@@ -6,7 +6,7 @@ Spend is never stored; it is computed from tokens and the Price Schedule on ever
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Iterable
@@ -160,3 +160,38 @@ def total_spend(engine: Engine) -> SpendTotal:
     with engine.connect() as conn:
         dollars, unpriced_count = conn.execute(text(sql)).one()
     return SpendTotal(Decimal(dollars), unpriced_count)
+
+
+@dataclass(frozen=True)
+class SeriesPoint:
+    timestamp: datetime  # UTC, start of the hour the Spend was incurred in
+    dollars: Decimal  # cumulative Spend up to and including this hour
+
+
+@dataclass(frozen=True)
+class SpendSeries:
+    points: list[SeriesPoint]  # ascending by time; empty for an empty Usage Ledger
+    unpriced_messages: int  # excluded from the dollars, as in total_spend
+
+
+def cumulative_spend(engine: Engine) -> SpendSeries:
+    """Cumulative Spend over time, bucketed by UTC hour. Unpriced messages are excluded and counted."""
+    cost = " + ".join(f"coalesce({c}, 0) * rate_{c}" for c in _DIMENSIONS)
+    unpriced = " or ".join(f"({c} > 0 and rate_{c} is null)" for c in _DIMENSIONS)
+    sql = f"""
+        select bucket, sum(dollars) over (order by bucket) as cumulative
+        from (
+            select date_trunc('hour', timestamp at time zone 'UTC') as bucket,
+                   sum(({cost}) / 1000000) as dollars
+            from ({_priced_messages_sql()}) priced
+            where not ({unpriced})
+            group by 1
+        ) hourly
+        order by bucket
+    """
+    with engine.connect() as conn:
+        rows = conn.execute(text(sql)).all()
+    return SpendSeries(
+        [SeriesPoint(b.replace(tzinfo=timezone.utc), Decimal(c)) for b, c in rows],
+        total_spend(engine).unpriced_messages,
+    )
