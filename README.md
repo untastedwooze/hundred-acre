@@ -58,3 +58,7 @@ cd backend && uv run spend record ~/.claude/projects/<project>/<session-id>.json
 ```
 
 API: `GET /api/spend/total` returns `{"dollars": "<full precision>", "unpriced_messages": N}`. The Price Schedule (`price_schedule` table, $ per million units) is seeded by migration 0002 from Anthropic's pricing page.
+
+## Backups
+
+Nightly offsite backup of `hundred_acre_spend` (systemd user timer, restore steps): see [ops/backup/README.md](ops/backup/README.md).
