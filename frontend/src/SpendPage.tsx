@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import FeatureTable from './FeatureTable'
 import CoverageNote from './spend/CoverageNote'
-import CumulativeSpendChart, { type SeriesPoint } from './spend/CumulativeSpendChart'
+import CumulativeSpendChart, { type FeatureMarker, type SeriesPoint } from './spend/CumulativeSpendChart'
 import { formatDollars, formatLocal } from './spend/format'
 
 type Series = { points: SeriesPoint[]; unpriced_messages: number }
@@ -9,6 +9,17 @@ type State = { status: 'loading' } | { status: 'unavailable' } | { status: 'ok';
 
 function CumulativeSection() {
   const [state, setState] = useState<State>({ status: 'loading' })
+  const [markers, setMarkers] = useState<FeatureMarker[]>([])
+
+  useEffect(() => {
+    // Completion markers are optional: if Feature data (GitHub) is unavailable the chart simply has none.
+    fetch('/api/spend/features')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad response'))))
+      .then((report: { features?: { issue: number; title: string; completed_at: string | null }[] }) =>
+        setMarkers((report.features ?? []).filter((f): f is FeatureMarker => f.completed_at !== null)),
+      )
+      .catch(() => setMarkers([]))
+  }, [])
 
   useEffect(() => {
     fetch('/api/spend/series')
@@ -33,7 +44,7 @@ function CumulativeSection() {
           <p>
             <strong>{formatDollars(last.dollars)}</strong>
           </p>
-          <CumulativeSpendChart points={points} />
+          <CumulativeSpendChart points={points} markers={markers} />
           <p>
             <time dateTime={first.timestamp}>{formatLocal(first.timestamp)}</time> to{' '}
             <time dateTime={last.timestamp}>{formatLocal(last.timestamp)}</time>

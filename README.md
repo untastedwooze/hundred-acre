@@ -68,3 +68,5 @@ API: `GET /api/spend/total` returns `{"dollars": "<full precision>", "unpriced_m
 ## Backups
 
 Nightly offsite backup of `hundred_acre_spend` (systemd user timer, restore steps): see [ops/backup/README.md](ops/backup/README.md).
+
+Each Feature's Spend is split into Build and Maintenance Spend per message: a message timestamped at or before the top-level issue's first-closed date is Build, a later one is Maintenance (a Session that straddles the close is split). Reopening and re-closing never moves the date. Each Feature also carries `build_dollars`, `maintenance_dollars` and `completed_at` (the first-closed date, null while never closed), which the cumulative chart draws as completion markers; with GitHub unreachable the chart simply has none.
