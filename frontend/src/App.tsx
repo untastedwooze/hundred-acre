@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import FeatureTable from './FeatureTable'
 import Header from './Header'
 
 type Health = 'loading' | 'ok' | 'unreachable'
@@ -18,6 +19,7 @@ function App() {
       <Header />
       <main>
         <p>API status: {health}</p>
+        <FeatureTable />
       </main>
     </>
   )

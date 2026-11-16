@@ -58,3 +58,5 @@ cd backend && uv run spend record ~/.claude/projects/<project>/<session-id>.json
 ```
 
 API: `GET /api/spend/total` returns `{"dollars": "<full precision>", "unpriced_messages": N}`. The Price Schedule (`price_schedule` table, $ per million units) is seeded by migration 0002 from Anthropic's pricing page.
+
+`GET /api/spend/features` returns per-Feature Spend (sub-issues rolled up) and Overhead. Sessions are attributed from the issue references `record` finds in transcripts (stored in `attributions.refs`, never conversation text) and resolved against GitHub live at query time; if `gh` cannot reach GitHub the response has `github_available: false`. Set `HUNDRED_ACRE_GITHUB_REPO=owner/name` if the API server does not run inside the repo.

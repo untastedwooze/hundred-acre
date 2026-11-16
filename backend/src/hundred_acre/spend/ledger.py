@@ -13,6 +13,8 @@ from typing import Iterable
 
 from sqlalchemy import Engine, text
 
+from hundred_acre.spend.attribution import extract_issue_refs
+
 
 @dataclass(frozen=True)
 class RecordResult:
@@ -75,8 +77,10 @@ def record(engine: Engine, transcripts: Iterable[Path]) -> RecordResult:
     Subagent usage is stored under the parent Session. Repeated lines for one message id count once.
     """
     messages: dict[str, dict] = {}
+    files: list[Path] = []
     for transcript in transcripts:
         for file in _transcript_files(Path(transcript)):
+            files.append(file)
             messages.update(_parse(file, is_subagent_file=file != Path(transcript)))
     if not messages:
         return RecordResult(0, 0)
@@ -119,6 +123,20 @@ def record(engine: Engine, transcripts: Iterable[Path]) -> RecordResult:
                 ),
                 m,
             )
+        # Transcript text is parsed transiently; only issue references are stored.
+        refs = extract_issue_refs(files)
+        for session_id in {m["session_id"] for m in messages.values()}:
+            conn.execute(
+                text(
+                    """
+                    insert into attributions (session_id, source, refs)
+                    values (:session_id, 'inferred', cast(:refs as jsonb))
+                    on conflict (session_id) do update set refs = excluded.refs
+                    where attributions.source = 'inferred'
+                    """
+                ),
+                {"session_id": session_id, "refs": json.dumps({str(n): c for n, c in refs.get(session_id, {}).items()})},
+            )
     return RecordResult(len(messages), len(messages) - len(existing))
 
 
@@ -142,6 +160,21 @@ def _priced_messages_sql() -> str:
         for col, dim in _DIMENSIONS.items()
     )
     return f"select m.*, {rate_cols} from messages m"
+
+
+def session_spend(engine: Engine) -> dict[str, tuple[Decimal, int]]:
+    """Per Session: (priced dollars, unpriced message count). Same pricing rules as `total_spend`."""
+    cost = " + ".join(f"coalesce({c}, 0) * rate_{c}" for c in _DIMENSIONS)
+    unpriced = " or ".join(f"({c} > 0 and rate_{c} is null)" for c in _DIMENSIONS)
+    sql = f"""
+        select session_id,
+            coalesce(sum(({cost}) / 1000000) filter (where not ({unpriced})), 0),
+            count(*) filter (where {unpriced})
+        from ({_priced_messages_sql()}) priced
+        group by session_id
+    """
+    with engine.connect() as conn:
+        return {sid: (Decimal(d), n) for sid, d, n in conn.execute(text(sql))}
 
 
 def total_spend(engine: Engine) -> SpendTotal:
