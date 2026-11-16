@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import FeatureTable from './FeatureTable'
 import CoverageNote from './spend/CoverageNote'
 import CumulativeSpendChart, { type SeriesPoint } from './spend/CumulativeSpendChart'
 import { formatDollars, formatLocal } from './spend/format'
@@ -52,6 +53,8 @@ export default function SpendPage() {
     <>
       <h1>Spend</h1>
       <CumulativeSection />
+      <h2>Features</h2>
+      <FeatureTable />
       <CoverageNote />
     </>
   )

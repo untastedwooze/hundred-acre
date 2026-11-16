@@ -56,3 +56,39 @@ def write_transcript(path: Path, lines: list[dict]) -> Path:
     noise = [{"type": "user", "sessionId": lines[0]["sessionId"], "message": {"content": "REDACTED"}}]
     path.write_text("\n".join(json.dumps(x) for x in noise + lines) + "\n")
     return path
+
+
+def bash_call(command: str, *, tool_id: str, session: str = "sess-1", branch: str | None = None) -> dict:
+    """An assistant line carrying a Bash tool call (no usage; attribution reads only tool calls)."""
+    line = {
+        "type": "assistant",
+        "sessionId": session,
+        "timestamp": "2026-11-16T03:00:00.000Z",
+        "message": {"content": [{"type": "tool_use", "id": tool_id, "name": "Bash", "input": {"command": command}}]},
+    }
+    if branch:
+        line["gitBranch"] = branch
+    return line
+
+
+def tool_output(output: str, *, tool_id: str, session: str = "sess-1") -> dict:
+    return {
+        "type": "user",
+        "sessionId": session,
+        "message": {"content": [{"type": "tool_result", "tool_use_id": tool_id, "content": output}]},
+    }
+
+
+def text_line(text: str, *, session: str = "sess-1", role: str = "user", branch: str | None = None) -> dict:
+    line = {"type": role, "sessionId": session, "message": {"role": role, "content": text}}
+    if branch:
+        line["gitBranch"] = branch
+    return line
+
+
+def creates_issue(number: int, *, tool_id: str = "t1", session: str = "sess-1") -> list[dict]:
+    """The two transcript lines of a `gh issue create` call and its output."""
+    return [
+        bash_call("gh issue create --title X --body Y", tool_id=tool_id, session=session),
+        tool_output(f"https://github.com/o/r/issues/{number}\n", tool_id=tool_id, session=session),
+    ]
