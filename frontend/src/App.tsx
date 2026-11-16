@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
+import { Route, Routes } from 'react-router-dom'
 import Header from './Header'
+import SpendPage from './SpendPage'
 
 type Health = 'loading' | 'ok' | 'unreachable'
 
-function App() {
+function Home() {
   const [health, setHealth] = useState<Health>('loading')
 
   useEffect(() => {
@@ -13,11 +15,19 @@ function App() {
       .catch(() => setHealth('unreachable'))
   }, [])
 
+  return <p>API status: {health}</p>
+}
+
+/** Rendered inside a Router (BrowserRouter in main.tsx, MemoryRouter in tests). */
+function App() {
   return (
     <>
       <Header />
       <main>
-        <p>API status: {health}</p>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/spend" element={<SpendPage />} />
+        </Routes>
       </main>
     </>
   )

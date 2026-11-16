@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 
 type Total = { dollars: string; unpriced_messages: number }
 type State = { status: 'loading' } | { status: 'unavailable' } | { status: 'ok'; total: Total }
@@ -23,7 +24,9 @@ export default function Header() {
       <span aria-label="Total Spend">
         {state.status === 'ok' && (
           <>
-            Spend to date: <span>{formatDollars(state.total.dollars)}</span>
+            <Link to="/spend">
+              Spend to date: <span>{formatDollars(state.total.dollars)}</span>
+            </Link>
             {state.total.unpriced_messages > 0 && <em> ({state.total.unpriced_messages} unpriced)</em>}
           </>
         )}
