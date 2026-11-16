@@ -5,7 +5,7 @@ Spend is never stored; it is computed from tokens and the Price Schedule on ever
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -23,7 +23,9 @@ class RecordResult:
 @dataclass(frozen=True)
 class SpendTotal:
     dollars: Decimal  # full precision; round for display. Excludes unpriced messages.
-    unpriced_messages: int  # messages whose model has no Price Schedule rate; NOT counted as $0 silently
+    unpriced_messages: int  # messages with usage that has no Price Schedule rate; NOT counted as $0 silently
+    unpriced_tokens: int = 0  # all tokens (input, output, cache) of the unpriced messages
+    unpriced_models: list[str] = field(default_factory=list)  # models of the unpriced messages, sorted
 
 
 def _transcript_files(path: Path) -> list[Path]:
@@ -65,6 +67,7 @@ def _parse(path: Path, is_subagent_file: bool) -> dict[str, dict]:
             "cache_write_5m_tokens": write_5m,
             "cache_write_1h_tokens": write_1h,
             "web_search_requests": (usage.get("server_tool_use") or {}).get("web_search_requests", 0),
+            "fast_mode": usage.get("speed") == "fast",
         }
     return found
 
@@ -105,21 +108,63 @@ def record(engine: Engine, transcripts: Iterable[Path]) -> RecordResult:
                     """
                     insert into messages (id, api_request_id, session_id, is_subagent, timestamp, model,
                         usage, input_tokens, output_tokens, cache_read_tokens, cache_write_5m_tokens,
-                        cache_write_1h_tokens, web_search_requests)
+                        cache_write_1h_tokens, web_search_requests, fast_mode)
                     values (:id, :api_request_id, :session_id, :is_subagent, :timestamp, :model,
                         cast(:usage as jsonb), :input_tokens, :output_tokens, :cache_read_tokens,
-                        :cache_write_5m_tokens, :cache_write_1h_tokens, :web_search_requests)
+                        :cache_write_5m_tokens, :cache_write_1h_tokens, :web_search_requests, :fast_mode)
                     on conflict (id) do update set
                         usage = excluded.usage, input_tokens = excluded.input_tokens,
                         output_tokens = excluded.output_tokens, cache_read_tokens = excluded.cache_read_tokens,
                         cache_write_5m_tokens = excluded.cache_write_5m_tokens,
                         cache_write_1h_tokens = excluded.cache_write_1h_tokens,
-                        web_search_requests = excluded.web_search_requests
+                        web_search_requests = excluded.web_search_requests, fast_mode = excluded.fast_mode
                     """
                 ),
                 m,
             )
     return RecordResult(len(messages), len(messages) - len(existing))
+
+
+def add_price(
+    engine: Engine,
+    *,
+    model: str,
+    dimension: str,
+    rate_per_million: Decimal,
+    effective_from: datetime,
+    modifier: str = "standard",
+    above_prompt_tokens: int | None = None,
+) -> None:
+    """Add (or correct) one Price Schedule entry; usage already recorded is repriced on the next query.
+
+    dimension: input | output | cache_read | cache_write_5m | cache_write_1h | web_search.
+    rate_per_million: dollars per million tokens (per million requests for web_search).
+    modifier: "standard"; "fast" (applies to fast-mode messages); or "long_context" (applies when the
+        prompt, i.e. input + cache reads + cache writes, exceeds above_prompt_tokens).
+    """
+    if modifier not in ("standard", "fast", "long_context"):
+        raise ValueError(f"unknown price modifier: {modifier}")
+    if (modifier == "long_context") != (above_prompt_tokens is not None):
+        raise ValueError("above_prompt_tokens is required for, and only for, the long_context modifier")
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                insert into price_schedule (model, dimension, modifier, above_prompt_tokens, rate_per_million, effective_from)
+                values (:model, :dimension, :modifier, :above, :rate, :effective_from)
+                on conflict (model, dimension, modifier, effective_from) do update set
+                    rate_per_million = excluded.rate_per_million, above_prompt_tokens = excluded.above_prompt_tokens
+                """
+            ),
+            {
+                "model": model,
+                "dimension": dimension,
+                "modifier": modifier,
+                "above": above_prompt_tokens,
+                "rate": rate_per_million,
+                "effective_from": effective_from,
+            },
+        )
 
 
 # Token column -> Price Schedule dimension.
@@ -131,35 +176,60 @@ _DIMENSIONS = {
     "cache_write_1h_tokens": "cache_write_1h",
     "web_search_requests": "web_search",
 }
+_TOKEN_COLUMNS = [c for c in _DIMENSIONS if c != "web_search_requests"]
+_PROMPT_TOKENS = "(m.input_tokens + m.cache_read_tokens + m.cache_write_5m_tokens + m.cache_write_1h_tokens)"
 
 
 def _priced_messages_sql() -> str:
-    """Per message: rate in effect at its timestamp for each dimension (null when no rate exists)."""
+    """Per message: rate in effect at its timestamp for each dimension (null when no rate exists).
+
+    Fast-mode messages use only fast rates (web search, which fast mode does not change, uses the
+    standard rate). Others use the standard rate, or the long-context rate when the prompt is over
+    its threshold. A fast or long-context message missing those rates is unpriced, never mispriced.
+    """
     rate_cols = ",\n".join(
         f"""(select p.rate_per_million from price_schedule p
              where p.model = m.model and p.dimension = '{dim}' and p.effective_from <= m.timestamp
-             order by p.effective_from desc limit 1) as rate_{col}"""
+               and case
+                 when m.fast_mode and '{dim}' <> 'web_search' then p.modifier = 'fast'
+                 else p.modifier = 'standard'
+                   or (p.modifier = 'long_context' and not m.fast_mode and {_PROMPT_TOKENS} > p.above_prompt_tokens)
+               end
+             order by p.effective_from desc, (p.modifier = 'long_context') desc limit 1) as rate_{col}"""
         for col, dim in _DIMENSIONS.items()
     )
     return f"select m.*, {rate_cols} from messages m"
 
 
+def _cost_sql() -> str:
+    """Dollars-per-million-scaled cost of a priced message row (shared by total_spend and cumulative_spend)."""
+    return " + ".join(f"{c} * coalesce(rate_{c}, 0)" for c in _DIMENSIONS)
+
+
+def _unpriced_sql() -> str:
+    """Predicate: the message has usage in a dimension with no applicable rate."""
+    return " or ".join(f"({c} > 0 and rate_{c} is null)" for c in _DIMENSIONS)
+
+
 def total_spend(engine: Engine) -> SpendTotal:
     """Total Spend to date: tokens x the Price Schedule rate in effect at each message's time.
 
-    A message that has tokens in a dimension with no rate is unpriced and excluded from dollars.
+    A message with usage in a dimension that has no rate is unpriced: its tokens are reported but it
+    contributes no dollars.
     """
-    cost = " + ".join(f"coalesce({c}, 0) * rate_{c}" for c in _DIMENSIONS)
-    unpriced = " or ".join(f"({c} > 0 and rate_{c} is null)" for c in _DIMENSIONS)
+    cost, unpriced = _cost_sql(), _unpriced_sql()
+    tokens = " + ".join(_TOKEN_COLUMNS)
     sql = f"""
         select
             coalesce(sum(({cost}) / 1000000) filter (where not ({unpriced})), 0) as dollars,
-            count(*) filter (where {unpriced}) as unpriced
+            count(*) filter (where {unpriced}) as unpriced,
+            coalesce(sum({tokens}) filter (where {unpriced}), 0) as unpriced_tokens,
+            coalesce(array_agg(distinct model order by model) filter (where {unpriced}), '{{}}') as unpriced_models
         from ({_priced_messages_sql()}) priced
     """
     with engine.connect() as conn:
-        dollars, unpriced_count = conn.execute(text(sql)).one()
-    return SpendTotal(Decimal(dollars), unpriced_count)
+        dollars, unpriced_count, unpriced_tokens, models = conn.execute(text(sql)).one()
+    return SpendTotal(Decimal(dollars), unpriced_count, int(unpriced_tokens), list(models))
 
 
 @dataclass(frozen=True)
@@ -176,8 +246,7 @@ class SpendSeries:
 
 def cumulative_spend(engine: Engine) -> SpendSeries:
     """Cumulative Spend over time, bucketed by UTC hour. Unpriced messages are excluded and counted."""
-    cost = " + ".join(f"coalesce({c}, 0) * rate_{c}" for c in _DIMENSIONS)
-    unpriced = " or ".join(f"({c} > 0 and rate_{c} is null)" for c in _DIMENSIONS)
+    cost, unpriced = _cost_sql(), _unpriced_sql()
     sql = f"""
         select bucket, sum(dollars) over (order by bucket) as cumulative
         from (

@@ -19,8 +19,9 @@ def assistant_line(
     subagent: bool = False,
     request_id: str | None = None,
     block: str = "text",
+    speed: str | None = None,
 ) -> dict:
-    return {
+    line = {
         "type": "assistant",
         "sessionId": session,
         "isSidechain": subagent,
@@ -45,6 +46,9 @@ def assistant_line(
             },
         },
     }
+    if speed:
+        line["message"]["usage"]["speed"] = speed
+    return line
 
 
 def write_transcript(path: Path, lines: list[dict]) -> Path:

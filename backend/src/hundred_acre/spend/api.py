@@ -17,11 +17,14 @@ def get_spend_engine() -> Engine:
 
 
 @router.get("/total")
-def get_total_spend(engine: Engine = Depends(get_spend_engine)) -> dict[str, str | int]:
+def get_total_spend(engine: Engine = Depends(get_spend_engine)) -> dict[str, str | int | bool | list[str]]:
     total = total_spend(engine)
     return {
         "dollars": format(total.dollars.normalize(), "f"),  # full precision; the UI rounds to the cent
         "unpriced_messages": total.unpriced_messages,
+        "unpriced_tokens": total.unpriced_tokens,
+        "unpriced_models": total.unpriced_models,
+        "has_unpriced": total.unpriced_messages > 0,  # the totals are incomplete: show the warning
     }
 
 
