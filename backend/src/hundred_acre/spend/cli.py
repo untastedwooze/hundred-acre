@@ -11,7 +11,9 @@ from sqlalchemy import create_engine
 
 from hundred_acre.spend.db import migrate, spend_database_url
 from hundred_acre.spend.autorecord import record_from_hook, sweep
+from hundred_acre.spend.features import FeatureSourceUnavailable, GhFeatureSource
 from hundred_acre.spend.ledger import add_price, record
+from hundred_acre.spend.reattribute import reattribute
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,7 +33,20 @@ def build_parser() -> argparse.ArgumentParser:
     sw = sub.add_parser("sweep", help="record every transcript for this repo and its git worktrees")
     sw.add_argument("--projects-dir", type=Path, default=Path.home() / ".claude" / "projects")
     sw.add_argument("--repo-root", help="defaults to the main checkout of the current git repo")
+    re = sub.add_parser("reattribute", help="manually attribute a Session to a Feature (any issue in it) or Overhead")
+    re.add_argument("session_id")
+    re.add_argument("target", type=_target, help="issue number (e.g. 8 or #8), or 'overhead'")
+    re.add_argument("--no-verify", action="store_true", help="do not check the issue exists on GitHub")
     return parser
+
+
+def _target(value: str) -> int | None:
+    if value.lower() == "overhead":
+        return None
+    try:
+        return int(value.lstrip("#"))
+    except ValueError:
+        raise argparse.ArgumentTypeError("expected an issue number or 'overhead'")
 
 
 def _utc_date(value: str) -> datetime:
@@ -87,6 +102,18 @@ def main(argv: list[str] | None = None) -> int:
         engine = create_engine(spend_database_url())
         result = sweep(engine, args.projects_dir, root, worktrees)
         print(f"swept: recorded {result.messages_added} new of {result.messages_seen} messages")
+        return 0
+    if args.command == "reattribute":
+        engine = create_engine(spend_database_url())
+        try:
+            reattribute(engine, args.session_id, args.target, None if args.no_verify else GhFeatureSource())
+        except LookupError as e:
+            print(f"spend: {e}", file=sys.stderr)
+            return 1
+        except FeatureSourceUnavailable as e:
+            print(f"spend: GitHub unreachable ({e}); use --no-verify to skip the issue check", file=sys.stderr)
+            return 1
+        print(f"attributed {args.session_id} to {'Overhead' if args.target is None else f'#{args.target}'} (manual)")
         return 0
     parser.print_help()
     return 0

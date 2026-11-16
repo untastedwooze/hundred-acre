@@ -5,11 +5,13 @@ from decimal import Decimal
 from functools import lru_cache
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import Engine, create_engine
 
 from hundred_acre.spend import cumulative_spend, total_spend
 from hundred_acre.spend.db import spend_database_url
-from hundred_acre.spend.features import FeatureSource, GhFeatureSource, feature_spend
+from hundred_acre.spend.features import FeatureSource, FeatureSourceUnavailable, GhFeatureSource, feature_spend
+from hundred_acre.spend.reattribute import list_sessions, reattribute
 
 router = APIRouter(prefix="/api/spend")
 
@@ -99,3 +101,53 @@ def get_spend_series(engine: Engine = Depends(get_spend_engine)) -> dict:
         ],
         "unpriced_messages": series.unpriced_messages,
     }
+
+
+@router.get("/sessions")
+def get_sessions(
+    needs_review: bool = False,
+    engine: Engine = Depends(get_spend_engine),
+    source: FeatureSource = Depends(get_feature_source),
+) -> dict:
+    """Sessions with their Attribution. `needs_review=true` lists only low-confidence ones.
+    When GitHub is unreachable, `github_available` is false and `sessions` is empty."""
+    try:
+        sessions = list_sessions(engine, source, needs_review)
+    except FeatureSourceUnavailable:
+        return {"github_available": False, "sessions": []}
+    return {
+        "github_available": True,
+        "sessions": [
+            {
+                "session_id": s.session_id,
+                "dollars": _dollars(s.dollars),
+                "last_seen": s.last_seen.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "source": s.source,
+                "target_issue": s.target_issue,
+                "target_title": s.target_title,
+                "low_confidence": s.low_confidence,
+            }
+            for s in sessions
+        ],
+    }
+
+
+class AttributionBody(BaseModel):
+    target_issue: int | None  # null = Overhead
+
+
+@router.post("/sessions/{session_id}/attribution")
+def post_attribution(
+    session_id: str,
+    body: AttributionBody,
+    engine: Engine = Depends(get_spend_engine),
+    source: FeatureSource = Depends(get_feature_source),
+) -> dict:
+    """Manually re-attribute a Session to a Feature (any issue in it) or Overhead."""
+    try:
+        reattribute(engine, session_id, body.target_issue, source)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except FeatureSourceUnavailable:
+        raise HTTPException(503, "GitHub is unreachable")
+    return {"session_id": session_id, "source": "manual", "target_issue": body.target_issue}
