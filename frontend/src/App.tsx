@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import Header from './Header'
 
 type Health = 'loading' | 'ok' | 'unreachable'
 
@@ -13,10 +14,12 @@ function App() {
   }, [])
 
   return (
-    <main>
-      <h1>hundred-acre</h1>
-      <p>API status: {health}</p>
-    </main>
+    <>
+      <Header />
+      <main>
+        <p>API status: {health}</p>
+      </main>
+    </>
   )
 }
 

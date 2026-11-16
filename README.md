@@ -54,4 +54,7 @@ cd frontend && npm test         # Vitest
 
 ```bash
 cd backend && uv run spend --help
+cd backend && uv run spend record ~/.claude/projects/<project>/<session-id>.jsonl   # also records its subagents/ transcripts
 ```
+
+API: `GET /api/spend/total` returns `{"dollars": "<full precision>", "unpriced_messages": N}`. The Price Schedule (`price_schedule` table, $ per million units) is seeded by migration 0002 from Anthropic's pricing page.
