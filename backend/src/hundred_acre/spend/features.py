@@ -16,7 +16,7 @@ from typing import Callable, Protocol
 from sqlalchemy import Engine, text
 
 from hundred_acre.spend.attribution import SIGNALS
-from hundred_acre.spend.ledger import session_spend
+from hundred_acre.spend.ledger import message_spend, session_spend
 
 
 class FeatureSourceUnavailable(Exception):
@@ -118,7 +118,10 @@ class FeatureSpend:
     issue: int  # the top-level issue
     title: str
     state: str  # "open" | "closed"; open Features show their live Spend so far
-    dollars: Decimal  # full precision, includes all sub-issues
+    dollars: Decimal  # full precision, includes all sub-issues; build_dollars + maintenance_dollars
+    build_dollars: Decimal  # Build Spend: messages at or before the top-level issue first closed (all, if never closed)
+    maintenance_dollars: Decimal  # Maintenance Spend: messages after the top-level issue first closed
+    first_closed_at: datetime | None  # Feature-completion date; reopening and re-closing never moves it
     sessions: int
     low_confidence_sessions: int  # Sessions that referenced more than one Feature
     ui_surface: str | None = None  # the UI Surface the Feature declares, if any
@@ -174,13 +177,14 @@ def feature_spend(engine: Engine, source: FeatureSource) -> FeatureSpendReport:
     always live. If the source is unavailable, no Feature is resolved and the report says so.
     """
     spend = session_spend(engine)
+    messages = message_spend(engine)
     with engine.connect() as conn:
         rows = conn.execute(text("select session_id, source, target_issue, refs from attributions")).all()
     attribution = {sid: (src, target, refs) for sid, src, target, refs in rows}
     unpriced = sum(n for _, n in spend.values())
 
     cache: dict[int, IssueInfo | None] = {}
-    totals: dict[int, list] = {}  # root -> [info, dollars, sessions, low confidence sessions]
+    totals: dict[int, list] = {}  # root -> [info, build, maintenance, sessions, low confidence sessions]
     overhead = Decimal(0)
     unresolved = Decimal(0)
     available = True
@@ -202,18 +206,25 @@ def feature_spend(engine: Engine, source: FeatureSource) -> FeatureSpendReport:
         if feature is None:
             overhead += dollars
             continue
-        entry = totals.setdefault(feature.number, [feature, Decimal(0), 0, 0])
-        entry[1] += dollars
-        entry[2] += 1
-        entry[3] += low
+        entry = totals.setdefault(feature.number, [feature, Decimal(0), Decimal(0), 0, 0])
+        # Split per message, not per Session: a Session can straddle the close. A message sent at the
+        # closing instant is Build; only later messages are Maintenance.
+        closed = feature.first_closed_at
+        for ts, amount in messages.get(sid, []):
+            entry[2 if closed is not None and ts > closed else 1] += amount
+        entry[3] += 1
+        entry[4] += low
 
     if not available:
         # Sessions resolved before the source failed must not be reported as a partial Feature table.
-        for info, dollars, _, _ in totals.values():
-            unresolved += dollars
+        for _, build, maintenance, _, _ in totals.values():
+            unresolved += build + maintenance
         totals = {}
     features = sorted(
-        (FeatureSpend(i.number, i.title, i.state, d, n, lc, i.ui_surface) for i, d, n, lc in totals.values()),
+        (
+            FeatureSpend(i.number, i.title, i.state, b + m, b, m, i.first_closed_at, n, lc, i.ui_surface)
+            for i, b, m, n, lc in totals.values()
+        ),
         key=lambda f: f.dollars,
         reverse=True,
     )
