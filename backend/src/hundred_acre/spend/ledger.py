@@ -13,7 +13,7 @@ from typing import Iterable
 
 from sqlalchemy import Engine, text
 
-from hundred_acre.spend.attribution import extract_issue_refs
+from hundred_acre.spend.attribution import DEFAULT_STAGE, extract_issue_refs, extract_stages
 
 
 @dataclass(frozen=True)
@@ -128,17 +128,23 @@ def record(engine: Engine, transcripts: Iterable[Path]) -> RecordResult:
             )
         # Transcript text is parsed transiently; only issue references are stored.
         refs = extract_issue_refs(files)
+        stages = extract_stages(files)
         for session_id in {m["session_id"] for m in messages.values()}:
             conn.execute(
                 text(
                     """
-                    insert into attributions (session_id, source, refs)
-                    values (:session_id, 'inferred', cast(:refs as jsonb))
-                    on conflict (session_id) do update set refs = excluded.refs
-                    where attributions.source = 'inferred'
+                    insert into attributions (session_id, source, refs, stage)
+                    values (:session_id, 'inferred', cast(:refs as jsonb), :stage)
+                    on conflict (session_id) do update set
+                        refs = case when attributions.source = 'inferred' then excluded.refs else attributions.refs end,
+                        stage = excluded.stage
                     """
                 ),
-                {"session_id": session_id, "refs": json.dumps({str(n): c for n, c in refs.get(session_id, {}).items()})},
+                {
+                    "session_id": session_id,
+                    "refs": json.dumps({str(n): c for n, c in refs.get(session_id, {}).items()}),
+                    "stage": stages.get(session_id, DEFAULT_STAGE),
+                },
             )
     return RecordResult(len(messages), len(messages) - len(existing))
 
@@ -241,6 +247,20 @@ def session_spend(engine: Engine) -> dict[str, tuple[Decimal, int]]:
     """
     with engine.connect() as conn:
         return {sid: (Decimal(d), n) for sid, d, n in conn.execute(text(sql))}
+
+
+def session_model_spend(engine: Engine) -> list[tuple[str, str, Decimal, int]]:
+    """Per (Session, model): (session id, model, priced dollars, unpriced message count)."""
+    cost, unpriced = _cost_sql(), _unpriced_sql()
+    sql = f"""
+        select session_id, model,
+            coalesce(sum(({cost}) / 1000000) filter (where not ({unpriced})), 0),
+            count(*) filter (where {unpriced})
+        from ({_priced_messages_sql()}) priced
+        group by session_id, model
+    """
+    with engine.connect() as conn:
+        return [(sid, model, Decimal(d), n) for sid, model, d, n in conn.execute(text(sql))]
 
 
 def total_spend(engine: Engine) -> SpendTotal:

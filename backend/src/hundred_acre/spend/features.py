@@ -138,20 +138,29 @@ def _root(source: FeatureSource, number: int, cache: dict[int, IssueInfo | None]
     return current
 
 
-def _infer(source, refs: dict[str, dict[str, int]], cache) -> tuple[IssueInfo | None, bool]:
-    """(Feature, low_confidence) for inferred references: strongest signal, then reference count."""
-    best: dict[int, list] = {}  # root number -> [strongest signal rank, reference count, root info]
+def _infer_issue(source, refs: dict[str, dict[str, int]], cache) -> tuple[IssueInfo | None, int | None, bool]:
+    """(Feature, strongest-referenced issue within it, low_confidence): strongest signal, then count."""
+    best: dict[int, list] = {}  # root number -> [strongest signal rank, reference count, root info, leaf key]
     for number, counts in refs.items():
         root = _root(source, int(number), cache)
         if root is None:
             continue
-        entry = best.setdefault(root.number, [len(SIGNALS), 0, root])
-        entry[0] = min(entry[0], *(SIGNALS.index(s) for s in counts))
-        entry[1] += sum(counts.values())
+        rank = min(SIGNALS.index(s) for s in counts)
+        total = sum(counts.values())
+        entry = best.setdefault(root.number, [len(SIGNALS), 0, root, (len(SIGNALS), 0, int(number))])
+        entry[0] = min(entry[0], rank)
+        entry[1] += total
+        entry[3] = min(entry[3], (rank, -total, int(number)))
     if not best:
-        return None, False
+        return None, None, False
     winner = min(best.values(), key=lambda b: (b[0], -b[1]))
-    return winner[2], len(best) > 1
+    return winner[2], winner[3][2], len(best) > 1
+
+
+def _infer(source, refs: dict[str, dict[str, int]], cache) -> tuple[IssueInfo | None, bool]:
+    """(Feature, low_confidence) for inferred references: strongest signal, then reference count."""
+    feature, _, low = _infer_issue(source, refs, cache)
+    return feature, low
 
 
 def feature_spend(engine: Engine, source: FeatureSource) -> FeatureSpendReport:

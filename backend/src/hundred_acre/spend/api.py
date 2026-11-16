@@ -1,14 +1,16 @@
 """Thin HTTP layer over the Spend module."""
 
+from datetime import timezone
 from decimal import Decimal
 from functools import lru_cache
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import Engine, create_engine
 
 from hundred_acre.spend import cumulative_spend, total_spend
 from hundred_acre.spend.db import spend_database_url
-from hundred_acre.spend.features import FeatureSource, GhFeatureSource, feature_spend
+from hundred_acre.spend.feature_detail import feature_detail
+from hundred_acre.spend.features import FeatureSource, FeatureSourceUnavailable, GhFeatureSource, feature_spend
 
 router = APIRouter(prefix="/api/spend")
 
@@ -49,6 +51,41 @@ def get_features(
         "overhead_dollars": _dollars(report.overhead_dollars),
         "unresolved_dollars": _dollars(report.unresolved_dollars),
         "unpriced_messages": report.unpriced_messages,
+    }
+
+
+@router.get("/features/{issue}")
+def get_feature_detail(
+    issue: int, engine: Engine = Depends(get_spend_engine), source: FeatureSource = Depends(get_feature_source)
+) -> dict:
+    """One Feature's Spend by Stage, sub-issue, model and Session. 404 unless `issue` is a top-level
+    issue; when GitHub is unreachable it answers 200 with `github_available` false."""
+    try:
+        detail = feature_detail(engine, source, issue)
+    except FeatureSourceUnavailable:
+        return {"github_available": False}
+    if detail is None:
+        raise HTTPException(status_code=404, detail="not a Feature")
+    return {
+        "github_available": True,
+        "issue": detail.issue,
+        "title": detail.title,
+        "state": detail.state,
+        "dollars": _dollars(detail.dollars),
+        "unpriced_messages": detail.unpriced_messages,
+        "by_stage": [{"stage": s.stage, "dollars": _dollars(s.dollars)} for s in detail.by_stage],
+        "by_sub_issue": [{"issue": s.issue, "title": s.title, "dollars": _dollars(s.dollars)} for s in detail.by_sub_issue],
+        "by_model": [{"model": m.model, "dollars": _dollars(m.dollars)} for m in detail.by_model],
+        "by_session": [
+            {
+                "session_id": s.session_id,
+                "stage": s.stage,
+                "sub_issue": s.sub_issue,
+                "first_seen": s.first_seen.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "dollars": _dollars(s.dollars),
+            }
+            for s in detail.by_session
+        ],
     }
 
 

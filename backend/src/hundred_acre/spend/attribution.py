@@ -23,6 +23,75 @@ _MENTION = re.compile(r"(?<![\w&/])#(\d+)\b")
 _BRANCH = re.compile(r"(?:^|/)(?:(?:ticket|issue)-(\d+)|(\d+)-[\w-]+)$")
 
 
+# The one Stage mapping table: pipeline skill name (plugin prefix stripped) -> Stage.
+STAGE_BY_SKILL = {
+    "grilling": "grill",
+    "grill-me": "grill",
+    "grill-with-docs": "grill",
+    "to-spec": "spec",
+    "write-spec": "spec",
+    "to-prd": "spec",
+    "to-issues": "spec",
+    "to-tickets": "spec",
+    "triage": "spec",
+    "tdd": "implement",
+    "implement-spec": "implement",
+    "implement": "implement",
+    "code-review": "review",
+    "review": "review",
+    "diagnosing-bugs": "fix",
+    "diagnose": "fix",
+}
+STAGES = ("grill", "spec", "implement", "review", "fix", "other")  # pipeline order
+DEFAULT_STAGE = "other"
+
+_COMMAND_NAME = re.compile(r"<command-name>/?([^<\s]+)</command-name>")
+
+
+def stage_for_skill(skill: str) -> str | None:
+    """The Stage a skill belongs to, or None if it is not a pipeline skill."""
+    return STAGE_BY_SKILL.get(skill.rsplit(":", 1)[-1].strip().lower())
+
+
+def _skill_names(entry: dict, content) -> list[str]:
+    names: list[str] = []
+    if entry.get("type") == "user":
+        names += [n for t in _text_blocks(content) for n in _COMMAND_NAME.findall(t)]
+    if not isinstance(content, str):
+        names += [
+            str((b.get("input") or {}).get("skill", ""))
+            for b in content
+            if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "Skill"
+        ]
+    return names
+
+
+def extract_stages(files: list[Path]) -> dict[str, str]:
+    """Stage per Session id: that of the first pipeline skill run (Skill tool or slash command).
+
+    A Session that runs no pipeline skill is 'other'. Only skill names are read, never other text.
+    """
+    stages: dict[str, str] = {}
+    for path in files:
+        for line in path.read_text().splitlines():
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            session = entry.get("sessionId")
+            message = entry.get("message")
+            if not session or not isinstance(message, dict):
+                continue
+            if stages.setdefault(session, DEFAULT_STAGE) != DEFAULT_STAGE:
+                continue
+            for name in _skill_names(entry, message.get("content") or []):
+                stage = stage_for_skill(name)
+                if stage:
+                    stages[session] = stage
+                    break
+    return stages
+
+
 def _add(refs: dict[str, dict[int, dict[str, int]]], session: str, number: int, signal: str, times: int = 1) -> None:
     counts = refs[session].setdefault(number, {})
     counts[signal] = counts.get(signal, 0) + times

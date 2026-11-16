@@ -9,7 +9,7 @@ from hundred_acre.spend.api import get_feature_source, get_spend_engine
 from hundred_acre.spend.features import FakeFeatureSource, FeatureSourceUnavailable, GhFeatureSource
 
 from test_spend_features import issue, session
-from transcripts import creates_issue
+from transcripts import creates_issue, skill_call
 
 
 def get_features(engine, source):
@@ -86,3 +86,38 @@ def test_gh_adapter_reports_unreachable_github_as_unavailable():
     gh = GhFeatureSource("o/r", run=fake_gh({"issues/1": FeatureSourceUnavailable}))
     with pytest.raises(FeatureSourceUnavailable):
         gh.issue(1)
+
+
+def get_detail(engine, source, issue_number):
+    app.dependency_overrides[get_spend_engine] = lambda: engine
+    app.dependency_overrides[get_feature_source] = lambda: source
+    try:
+        return TestClient(app).get(f"/api/spend/features/{issue_number}")
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_feature_detail_endpoint_breaks_spend_down(spend_engine, tmp_path):
+    record(spend_engine, [session(tmp_path, "a", 1, *creates_issue(2, session="a"), skill_call("tdd", session="a"))])
+    response = get_detail(spend_engine, FakeFeatureSource({1: issue(1, "Top"), 2: issue(2, "Sub", parent=1)}), 1)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["github_available"] is True
+    assert (body["issue"], body["title"], body["state"], body["dollars"]) == (1, "Top", "open", "10")
+    assert body["by_stage"] == [{"stage": "implement", "dollars": "10"}]
+    assert body["by_sub_issue"] == [{"issue": 2, "title": "Sub", "dollars": "10"}]
+    assert body["by_model"] == [{"model": "claude-sonnet-5-5", "dollars": "10"}]
+    [s] = body["by_session"]
+    assert (s["session_id"], s["stage"], s["sub_issue"], s["dollars"]) == ("a", "implement", 2, "10")
+    assert s["first_seen"].endswith("Z")
+
+
+def test_feature_detail_endpoint_is_404_for_a_sub_issue_or_unknown_issue(spend_engine):
+    source = FakeFeatureSource({1: issue(1), 2: issue(2, parent=1)})
+    assert get_detail(spend_engine, source, 2).status_code == 404
+    assert get_detail(spend_engine, source, 99).status_code == 404
+
+
+def test_feature_detail_endpoint_says_github_is_unavailable_instead_of_failing(spend_engine):
+    response = get_detail(spend_engine, FakeFeatureSource({}, available=False), 1)
+    assert response.status_code == 200 and response.json() == {"github_available": False}
