@@ -11,6 +11,7 @@ from hundred_acre.spend.features import (
     IssueInfo,
     feature_spend,
 )
+from hundred_acre.spend.reattribute import SessionAttribution, list_sessions, reattribute
 from hundred_acre.spend.ledger import (
     RecordResult,
     SeriesPoint,
@@ -31,12 +32,15 @@ __all__ = [
     "GhFeatureSource",
     "IssueInfo",
     "RecordResult",
+    "SessionAttribution",
     "SeriesPoint",
     "SpendSeries",
     "SpendTotal",
     "add_price",
     "cumulative_spend",
     "feature_spend",
+    "list_sessions",
+    "reattribute",
     "record",
     "record_from_hook",
     "sweep",
