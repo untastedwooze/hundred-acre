@@ -96,3 +96,25 @@ def test_a_feature_never_closed_is_all_build(spend_engine, tmp_path):
     record(spend_engine, [session(tmp_path, "a", 1, *creates_issue(1, session="a"))])
     (f,) = feature_spend(spend_engine, FakeFeatureSource({1: issue(1)})).features
     assert (f.build_dollars, f.maintenance_dollars, f.first_closed_at) == (Decimal("10"), Decimal(0), None)
+
+
+def test_one_unresolvable_session_does_not_move_other_features_to_unresolved(spend_engine, tmp_path):
+    from hundred_acre.spend.features import FeatureSourceUnavailable
+
+    class FlakySource(FakeFeatureSource):
+        def issue(self, number):
+            if number == 2:
+                raise FeatureSourceUnavailable("flaky")
+            return super().issue(number)
+
+    record(
+        spend_engine,
+        [
+            session(tmp_path, "ok", 1, *creates_issue(1, session="ok")),
+            session(tmp_path, "bad", 2, *creates_issue(2, session="bad")),
+        ],
+    )
+    report = feature_spend(spend_engine, FlakySource({1: issue(1), 2: issue(2)}))
+    assert not report.github_available  # some lookup failed: the table may be incomplete
+    assert spend_by_feature(report) == {1: Decimal("10")}
+    assert report.unresolved_dollars == Decimal("20")

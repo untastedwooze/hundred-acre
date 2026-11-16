@@ -37,7 +37,7 @@ export default function FeatureTable() {
   if (state.status === 'unavailable') return <p>Feature breakdown unavailable</p>
 
   const { report } = state
-  if (!report.github_available) {
+  if (!report.github_available && report.features.length === 0) {
     return (
       <p>
         Feature breakdown unavailable: GitHub is unreachable ({money(report.unresolved_dollars)} of Spend is waiting to be
@@ -49,6 +49,12 @@ export default function FeatureTable() {
   const sorted = [...report.features].sort((a, b) => (Number(a.dollars) - Number(b.dollars)) * (descending ? -1 : 1))
   return (
     <section>
+      {!report.github_available && (
+        <p>
+          Feature breakdown incomplete: GitHub is unreachable ({money(report.unresolved_dollars)} of Spend is waiting to be
+          attributed).
+        </p>
+      )}
       {report.unpriced_messages > 0 && <p>Warning: {report.unpriced_messages} unpriced messages are not included.</p>}
       <table>
         <thead>
@@ -74,6 +80,15 @@ export default function FeatureTable() {
               <td>{money(f.maintenance_dollars)}</td>
             </tr>
           ))}
+          {report.unpriced_messages > 0 && (
+            <tr>
+              <td>Unpriced usage</td>
+              <td></td>
+              <td>{report.unpriced_messages} messages not priced</td>
+              <td></td>
+              <td></td>
+            </tr>
+          )}
           <tr>
             <td>Overhead</td>
             <td></td>

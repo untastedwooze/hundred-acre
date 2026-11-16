@@ -11,7 +11,8 @@ from decimal import Decimal
 
 from sqlalchemy import Engine, text
 
-from hundred_acre.spend.features import FeatureSource, _infer, _root
+from hundred_acre.spend.attribution import AttributionSource
+from hundred_acre.spend.features import FeatureSource, resolve_attribution
 from hundred_acre.spend.ledger import session_spend
 
 
@@ -20,7 +21,7 @@ class SessionAttribution:
     session_id: str
     dollars: Decimal
     last_seen: datetime
-    source: str  # "inferred" | "manual"
+    source: AttributionSource
     target_issue: int | None  # the Feature (top-level issue); None = Overhead
     target_title: str | None
     low_confidence: bool  # inferred from references to more than one Feature
@@ -61,11 +62,8 @@ def list_sessions(engine: Engine, source: FeatureSource, needs_review: bool = Fa
     result = []
     for sid, last_seen in seen.items():
         src, target, refs = attribution.get(sid, ("inferred", None, {}))
-        if src == "manual":
-            feature = _root(source, target, cache) if target is not None else None
-            low = False
-        else:
-            feature, low = _infer(source, refs, cache)
+        resolution = resolve_attribution(source, src, target, refs, cache)
+        feature, low = resolution.feature, resolution.low_confidence
         if needs_review and not low:
             continue
         result.append(

@@ -1,4 +1,4 @@
-"""Baseline: empty Spend schema. Ledger tables arrive in later tickets.
+"""Baseline: empty Spend schema. Ledger tables arrive in later migrations.
 
 Revision ID: 0001
 Revises:

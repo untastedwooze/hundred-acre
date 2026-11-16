@@ -15,7 +15,7 @@ from typing import Callable, Protocol
 
 from sqlalchemy import Engine, text
 
-from hundred_acre.spend.attribution import SIGNALS
+from hundred_acre.spend.attribution import SIGNALS, AttributionSource
 from hundred_acre.spend.ledger import message_spend, session_spend
 
 
@@ -47,6 +47,10 @@ class FeatureSource(Protocol):
         """The issue, or None if no such issue exists. Raises FeatureSourceUnavailable if unreachable."""
         ...
 
+    def issues_declaring_surface(self, name: str) -> list[IssueInfo]:
+        """Top-level issues (Features) that declare UI Surface `name`. Raises FeatureSourceUnavailable if unreachable."""
+        ...
+
 
 @dataclass
 class FakeFeatureSource:
@@ -59,6 +63,11 @@ class FakeFeatureSource:
         if not self.available:
             raise FeatureSourceUnavailable("fake source is unavailable")
         return self.issues.get(number)
+
+    def issues_declaring_surface(self, name: str) -> list[IssueInfo]:
+        if not self.available:
+            raise FeatureSourceUnavailable("fake source is unavailable")
+        return [i for i in self.issues.values() if i.parent is None and i.ui_surface == name]
 
 
 Runner = Callable[[list[str]], str]
@@ -112,6 +121,18 @@ class GhFeatureSource:
             ui_surface=parse_ui_surface(data.get("body")),
         )
 
+    def issues_declaring_surface(self, name: str) -> list[IssueInfo]:
+        # One listing call narrows to issues whose body mentions a ui-surface line; only those are
+        # fetched in full, so the cost does not grow with every issue's parent/timeline lookups.
+        numbers = self._get(
+            "issues?state=all&per_page=100",
+            "--paginate",
+            "--jq",
+            '.[] | select(.pull_request == null) | select((.body // "") | test("ui-surface:"; "i")) | .number',
+        )
+        found = (self.issue(int(n)) for n in (numbers or "").split())
+        return [i for i in found if i and i.parent is None and i.ui_surface == name]
+
 
 @dataclass(frozen=True)
 class FeatureSpend:
@@ -129,14 +150,23 @@ class FeatureSpend:
 
 @dataclass(frozen=True)
 class FeatureSpendReport:
-    github_available: bool  # False: features is empty and unresolved_dollars holds the unattributable rest
+    github_available: bool  # False: a lookup failed, so `features` may be incomplete; the Spend of the Sessions that could not be resolved is in unresolved_dollars
     features: list[FeatureSpend]  # highest Spend first
     overhead_dollars: Decimal
     unresolved_dollars: Decimal  # Spend of Sessions with issue references that could not be resolved
     unpriced_messages: int
 
 
-def _root(source: FeatureSource, number: int, cache: dict[int, IssueInfo | None]) -> IssueInfo | None:
+@dataclass(frozen=True)
+class Resolution:
+    """Where one Session's Attribution lands."""
+
+    feature: IssueInfo | None  # the Feature (top-level issue); None = Overhead
+    sub_issue: int | None  # the issue within the Feature the Session worked on, when known
+    low_confidence: bool  # inferred from references to more than one Feature
+
+
+def root_issue(source: FeatureSource, number: int, cache: dict[int, IssueInfo | None]) -> IssueInfo | None:
     """The top-level issue above `number`, or None if `number` is not an issue."""
     seen: set[int] = set()
     current: IssueInfo | None = None
@@ -154,36 +184,77 @@ def _root(source: FeatureSource, number: int, cache: dict[int, IssueInfo | None]
     return current
 
 
-def _infer_issue(source, refs: dict[str, dict[str, int]], cache) -> tuple[IssueInfo | None, int | None, bool]:
-    """(Feature, strongest-referenced issue within it, low_confidence): strongest signal, then count."""
-    best: dict[int, list] = {}  # root number -> [strongest signal rank, reference count, root info, leaf key]
+@dataclass
+class _Candidate:
+    root: IssueInfo
+    rank: int = len(SIGNALS)  # strongest signal referencing this Feature (lower is stronger)
+    references: int = 0
+    leaf: tuple[int, int, int] = (len(SIGNALS), 0, 0)  # (rank, -references, issue) of the strongest-referenced issue
+
+
+def infer_issue(source: FeatureSource, refs: dict[str, dict[str, int]], cache) -> Resolution:
+    """Feature for stored issue references: strongest signal, then reference count."""
+    candidates: dict[int, _Candidate] = {}
     for number, counts in refs.items():
-        root = _root(source, int(number), cache)
+        root = root_issue(source, int(number), cache)
         if root is None:
             continue
         rank = min(SIGNALS.index(s) for s in counts)
         total = sum(counts.values())
-        entry = best.setdefault(root.number, [len(SIGNALS), 0, root, (len(SIGNALS), 0, int(number))])
-        entry[0] = min(entry[0], rank)
-        entry[1] += total
-        entry[3] = min(entry[3], (rank, -total, int(number)))
-    if not best:
-        return None, None, False
-    winner = min(best.values(), key=lambda b: (b[0], -b[1]))
-    return winner[2], winner[3][2], len(best) > 1
+        candidate = candidates.setdefault(root.number, _Candidate(root))
+        candidate.rank = min(candidate.rank, rank)
+        candidate.references += total
+        candidate.leaf = min(candidate.leaf, (rank, -total, int(number)))
+    if not candidates:
+        return Resolution(None, None, False)
+    winner = min(candidates.values(), key=lambda c: (c.rank, -c.references))
+    return Resolution(winner.root, winner.leaf[2], len(candidates) > 1)
 
 
-def _infer(source, refs: dict[str, dict[str, int]], cache) -> tuple[IssueInfo | None, bool]:
-    """(Feature, low_confidence) for inferred references: strongest signal, then reference count."""
-    feature, _, low = _infer_issue(source, refs, cache)
-    return feature, low
+def resolve_attribution(
+    source: FeatureSource,
+    attribution_source: AttributionSource,
+    target: int | None,
+    refs: dict[str, dict[str, int]],
+    cache: dict[int, IssueInfo | None],
+) -> Resolution:
+    """A Session's Feature: its manual Attribution if set (target None = Overhead), else inferred from its references."""
+    if attribution_source == "manual":
+        feature = root_issue(source, target, cache) if target is not None else None
+        return Resolution(feature, target, False)
+    return infer_issue(source, refs, cache)
+
+
+@dataclass
+class _FeatureTotals:
+    info: IssueInfo
+    build: Decimal = Decimal(0)
+    maintenance: Decimal = Decimal(0)
+    sessions: int = 0
+    low_confidence_sessions: int = 0
+
+
+def split_build_maintenance(
+    first_closed_at: datetime | None, messages: list[tuple[datetime, Decimal]]
+) -> tuple[Decimal, Decimal]:
+    """(Build, Maintenance) Spend of messages, split per message, not per Session: a Session can straddle
+    the close. A message sent at the closing instant is Build; only later messages are Maintenance."""
+    build = maintenance = Decimal(0)
+    for ts, amount in messages:
+        if first_closed_at is not None and ts > first_closed_at:
+            maintenance += amount
+        else:
+            build += amount
+    return build, maintenance
 
 
 def feature_spend(engine: Engine, source: FeatureSource) -> FeatureSpendReport:
     """Spend per Feature (sub-issues rolled up), plus Overhead.
 
     Inferred Attributions are resolved here from the stored issue references, so Feature metadata is
-    always live. If the source is unavailable, no Feature is resolved and the report says so.
+    always live. A Session whose references cannot be resolved because the source is unavailable goes
+    to `unresolved_dollars` and clears `github_available`; Features resolved from other Sessions keep
+    their Spend.
     """
     spend = session_spend(engine)
     messages = message_spend(engine)
@@ -193,18 +264,14 @@ def feature_spend(engine: Engine, source: FeatureSource) -> FeatureSpendReport:
     unpriced = sum(n for _, n in spend.values())
 
     cache: dict[int, IssueInfo | None] = {}
-    totals: dict[int, list] = {}  # root -> [info, build, maintenance, sessions, low confidence sessions]
+    totals: dict[int, _FeatureTotals] = {}
     overhead = Decimal(0)
     unresolved = Decimal(0)
     available = True
     for sid, (dollars, _) in spend.items():
         src, target, refs = attribution.get(sid, ("inferred", None, {}))
         try:
-            if src == "manual":
-                feature = _root(source, target, cache) if target is not None else None
-                low = False
-            else:
-                feature, low = _infer(source, refs, cache)
+            resolution = resolve_attribution(source, src, target, refs, cache)
         except FeatureSourceUnavailable:
             available = False
             if src == "manual" and target is None or src == "inferred" and not refs:
@@ -212,27 +279,32 @@ def feature_spend(engine: Engine, source: FeatureSource) -> FeatureSpendReport:
             else:
                 unresolved += dollars
             continue
+        feature = resolution.feature
         if feature is None:
             overhead += dollars
             continue
-        entry = totals.setdefault(feature.number, [feature, Decimal(0), Decimal(0), 0, 0])
-        # Split per message, not per Session: a Session can straddle the close. A message sent at the
-        # closing instant is Build; only later messages are Maintenance.
-        closed = feature.first_closed_at
-        for ts, amount in messages.get(sid, []):
-            entry[2 if closed is not None and ts > closed else 1] += amount
-        entry[3] += 1
-        entry[4] += low
+        entry = totals.setdefault(feature.number, _FeatureTotals(feature))
+        build, maintenance = split_build_maintenance(feature.first_closed_at, messages.get(sid, []))
+        entry.build += build
+        entry.maintenance += maintenance
+        entry.sessions += 1
+        entry.low_confidence_sessions += resolution.low_confidence
 
-    if not available:
-        # Sessions resolved before the source failed must not be reported as a partial Feature table.
-        for _, build, maintenance, _, _ in totals.values():
-            unresolved += build + maintenance
-        totals = {}
     features = sorted(
         (
-            FeatureSpend(i.number, i.title, i.state, b + m, b, m, i.first_closed_at, n, lc, i.ui_surface)
-            for i, b, m, n, lc in totals.values()
+            FeatureSpend(
+                t.info.number,
+                t.info.title,
+                t.info.state,
+                t.build + t.maintenance,
+                t.build,
+                t.maintenance,
+                t.info.first_closed_at,
+                t.sessions,
+                t.low_confidence_sessions,
+                t.info.ui_surface,
+            )
+            for t in totals.values()
         ),
         key=lambda f: f.dollars,
         reverse=True,

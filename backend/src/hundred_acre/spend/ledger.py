@@ -225,9 +225,9 @@ def _priced_messages_sql() -> str:
     return f"select m.*, {rate_cols} from messages m"
 
 
-def _cost_sql() -> str:
-    """Dollars-per-million-scaled cost of a priced message row (shared by total_spend and cumulative_spend)."""
-    return " + ".join(f"{c} * coalesce(rate_{c}, 0)" for c in _DIMENSIONS)
+def _message_dollars_sql() -> str:
+    """Spend in dollars of one priced message row: tokens x rate, per million."""
+    return "((" + " + ".join(f"{c} * coalesce(rate_{c}, 0)" for c in _DIMENSIONS) + ") / 1000000)"
 
 
 def _unpriced_sql() -> str:
@@ -235,12 +235,17 @@ def _unpriced_sql() -> str:
     return " or ".join(f"({c} > 0 and rate_{c} is null)" for c in _DIMENSIONS)
 
 
+def _priced_dollars_sql() -> str:
+    """Aggregate: Spend of the priced messages in the group (unpriced messages contribute nothing)."""
+    return f"coalesce(sum({_message_dollars_sql()}) filter (where not ({_unpriced_sql()})), 0)"
+
+
 def session_spend(engine: Engine) -> dict[str, tuple[Decimal, int]]:
     """Per Session: (priced dollars, unpriced message count). Same pricing rules as `total_spend`."""
-    cost, unpriced = _cost_sql(), _unpriced_sql()
+    unpriced = _unpriced_sql()
     sql = f"""
         select session_id,
-            coalesce(sum(({cost}) / 1000000) filter (where not ({unpriced})), 0),
+            {_priced_dollars_sql()},
             count(*) filter (where {unpriced})
         from ({_priced_messages_sql()}) priced
         group by session_id
@@ -251,10 +256,10 @@ def session_spend(engine: Engine) -> dict[str, tuple[Decimal, int]]:
 
 def session_model_spend(engine: Engine) -> list[tuple[str, str, Decimal, int]]:
     """Per (Session, model): (session id, model, priced dollars, unpriced message count)."""
-    cost, unpriced = _cost_sql(), _unpriced_sql()
+    unpriced = _unpriced_sql()
     sql = f"""
         select session_id, model,
-            coalesce(sum(({cost}) / 1000000) filter (where not ({unpriced})), 0),
+            {_priced_dollars_sql()},
             count(*) filter (where {unpriced})
         from ({_priced_messages_sql()}) priced
         group by session_id, model
@@ -269,11 +274,11 @@ def total_spend(engine: Engine) -> SpendTotal:
     A message with usage in a dimension that has no rate is unpriced: its tokens are reported but it
     contributes no dollars.
     """
-    cost, unpriced = _cost_sql(), _unpriced_sql()
+    unpriced = _unpriced_sql()
     tokens = " + ".join(_TOKEN_COLUMNS)
     sql = f"""
         select
-            coalesce(sum(({cost}) / 1000000) filter (where not ({unpriced})), 0) as dollars,
+            {_priced_dollars_sql()} as dollars,
             count(*) filter (where {unpriced}) as unpriced,
             coalesce(sum({tokens}) filter (where {unpriced}), 0) as unpriced_tokens,
             coalesce(array_agg(distinct model order by model) filter (where {unpriced}), '{{}}') as unpriced_models
@@ -298,12 +303,12 @@ class SpendSeries:
 
 def cumulative_spend(engine: Engine) -> SpendSeries:
     """Cumulative Spend over time, bucketed by UTC hour. Unpriced messages are excluded and counted."""
-    cost, unpriced = _cost_sql(), _unpriced_sql()
+    unpriced = _unpriced_sql()
     sql = f"""
         select bucket, sum(dollars) over (order by bucket) as cumulative
         from (
             select date_trunc('hour', timestamp at time zone 'UTC') as bucket,
-                   sum(({cost}) / 1000000) as dollars
+                   sum({_message_dollars_sql()}) as dollars
             from ({_priced_messages_sql()}) priced
             where not ({unpriced})
             group by 1
@@ -320,9 +325,9 @@ def cumulative_spend(engine: Engine) -> SpendSeries:
 
 def message_spend(engine: Engine) -> dict[str, list[tuple[datetime, Decimal]]]:
     """Per Session: (timestamp, dollars) of each priced message. Unpriced messages are excluded, as in `session_spend`."""
-    cost, unpriced = _cost_sql(), _unpriced_sql()
+    unpriced = _unpriced_sql()
     sql = f"""
-        select session_id, timestamp, ({cost}) / 1000000
+        select session_id, timestamp, {_message_dollars_sql()}
         from ({_priced_messages_sql()}) priced
         where not ({unpriced})
     """

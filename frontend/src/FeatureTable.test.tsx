@@ -97,3 +97,24 @@ test("shows Build Spend and Maintenance Spend next to the total for each Feature
   const at = (name: string) => cells[headers.findIndex((h) => h === name)];
   expect([at("Build"), at("Maintenance")]).toEqual(["$10.00", "$2.00"]);
 });
+
+test("shows unpriced usage as its own row with a warning", async () => {
+  stubFeatures({ ...base, unpriced_messages: 3, features: [feature(1, "Spend tracking", "12")] });
+  render(<FeatureTable />, { wrapper: MemoryRouter });
+  await screen.findByText("#1 Spend tracking");
+  const row = screen.getAllByRole("row").find((r) => /unpriced usage/i.test(r.textContent ?? ""));
+  expect(row?.textContent).toMatch(/3 messages/);
+  expect(row?.textContent).toMatch(/not priced/i);
+});
+
+test("keeps showing resolved Features when GitHub failed for some Sessions", async () => {
+  stubFeatures({
+    ...base,
+    github_available: false,
+    unresolved_dollars: "10",
+    features: [feature(1, "Spend tracking", "12")],
+  });
+  render(<FeatureTable />, { wrapper: MemoryRouter });
+  expect(await screen.findByText("#1 Spend tracking")).toBeTruthy();
+  expect(screen.getByText(/GitHub is unreachable/i).textContent).toContain("$10.00");
+});

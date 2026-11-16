@@ -8,9 +8,14 @@ import json
 import re
 from collections import defaultdict
 from pathlib import Path
+from typing import Iterator, Literal, get_args
+
+Signal = Literal["created", "closed", "branch", "mentioned"]
+Stage = Literal["grill", "spec", "implement", "review", "fix", "other"]
+AttributionSource = Literal["inferred", "manual"]
 
 # Strongest first. Ranking between Features uses this order, then the reference count.
-SIGNALS = ("created", "closed", "branch", "mentioned")
+SIGNALS: tuple[Signal, ...] = get_args(Signal)
 
 # issue number -> signal -> count
 IssueRefs = dict[int, dict[str, int]]
@@ -24,7 +29,7 @@ _BRANCH = re.compile(r"(?:^|/)(?:(?:ticket|issue)-(\d+)|(\d+)-[\w-]+)$")
 
 
 # The one Stage mapping table: pipeline skill name (plugin prefix stripped) -> Stage.
-STAGE_BY_SKILL = {
+STAGE_BY_SKILL: dict[str, Stage] = {
     "grilling": "grill",
     "grill-me": "grill",
     "grill-with-docs": "grill",
@@ -42,15 +47,28 @@ STAGE_BY_SKILL = {
     "diagnosing-bugs": "fix",
     "diagnose": "fix",
 }
-STAGES = ("grill", "spec", "implement", "review", "fix", "other")  # pipeline order
-DEFAULT_STAGE = "other"
+STAGES: tuple[Stage, ...] = get_args(Stage)  # pipeline order
+DEFAULT_STAGE: Stage = "other"
 
 _COMMAND_NAME = re.compile(r"<command-name>/?([^<\s]+)</command-name>")
 
 
-def stage_for_skill(skill: str) -> str | None:
+def stage_for_skill(skill: str) -> Stage | None:
     """The Stage a skill belongs to, or None if it is not a pipeline skill."""
     return STAGE_BY_SKILL.get(skill.rsplit(":", 1)[-1].strip().lower())
+
+
+def _entries(path: Path) -> Iterator[tuple[dict, str, dict]]:
+    """(entry, session id, message) for each transcript line that belongs to a Session and has a message."""
+    for line in path.read_text().splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        session = entry.get("sessionId")
+        message = entry.get("message")
+        if session and isinstance(message, dict):
+            yield entry, session, message
 
 
 def _skill_names(entry: dict, content) -> list[str]:
@@ -66,22 +84,14 @@ def _skill_names(entry: dict, content) -> list[str]:
     return names
 
 
-def extract_stages(files: list[Path]) -> dict[str, str]:
+def extract_stages(files: list[Path]) -> dict[str, Stage]:
     """Stage per Session id: that of the first pipeline skill run (Skill tool or slash command).
 
     A Session that runs no pipeline skill is 'other'. Only skill names are read, never other text.
     """
-    stages: dict[str, str] = {}
+    stages: dict[str, Stage] = {}
     for path in files:
-        for line in path.read_text().splitlines():
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            session = entry.get("sessionId")
-            message = entry.get("message")
-            if not session or not isinstance(message, dict):
-                continue
+        for entry, session, message in _entries(path):
             if stages.setdefault(session, DEFAULT_STAGE) != DEFAULT_STAGE:
                 continue
             for name in _skill_names(entry, message.get("content") or []):
@@ -113,15 +123,7 @@ def extract_issue_refs(files: list[Path]) -> dict[str, IssueRefs]:
     branches: dict[str, set[str]] = defaultdict(set)
     for path in files:
         commands: dict[str, str] = {}  # tool_use id -> Bash command
-        for line in path.read_text().splitlines():
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            session = entry.get("sessionId")
-            message = entry.get("message")
-            if not session or not isinstance(message, dict):
-                continue
+        for entry, session, message in _entries(path):
             if entry.get("gitBranch"):
                 branches[session].add(entry["gitBranch"])
             content = message.get("content") or []

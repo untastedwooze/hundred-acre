@@ -79,6 +79,8 @@ def get_feature_detail(
         "title": detail.title,
         "state": detail.state,
         "dollars": _dollars(detail.dollars),
+        "build_dollars": _dollars(detail.build_dollars),
+        "maintenance_dollars": _dollars(detail.maintenance_dollars),
         "unpriced_messages": detail.unpriced_messages,
         "by_stage": [{"stage": s.stage, "dollars": _dollars(s.dollars)} for s in detail.by_stage],
         "by_sub_issue": [{"issue": s.issue, "title": s.title, "dollars": _dollars(s.dollars)} for s in detail.by_sub_issue],
@@ -100,19 +102,24 @@ def get_feature_detail(
 def get_surface_spend(
     name: str, engine: Engine = Depends(get_spend_engine), source: FeatureSource = Depends(get_feature_source)
 ) -> dict:
-    """The Spend of the Feature that declares UI Surface `name`. 404 if no Feature (with Spend) declares it;
-    200 with `github_available: false` when GitHub is unreachable."""
+    """The Spend of the Feature that declares UI Surface `name` ($0 for a Feature with no Spend yet). 404 if
+    no Feature declares it; 200 with `github_available: false` when GitHub is unreachable."""
+    unavailable = {"github_available": False, "surface": name, "feature": None}
     report = feature_spend(engine, source)
     if not report.github_available:
-        return {"github_available": False, "surface": name, "feature": None}
-    for f in report.features:
-        if f.ui_surface == name:
-            return {
-                "github_available": True,
-                "surface": name,
-                "feature": {"issue": f.issue, "title": f.title, "state": f.state, "dollars": _dollars(f.dollars)},
-            }
-    raise HTTPException(status_code=404, detail=f"unknown UI Surface: {name}")
+        return unavailable
+    found = next((f for f in report.features if f.ui_surface == name), None)
+    if found is not None:
+        feature = {"issue": found.issue, "title": found.title, "state": found.state, "dollars": _dollars(found.dollars)}
+    else:
+        try:
+            declared = source.issues_declaring_surface(name)
+        except FeatureSourceUnavailable:
+            return unavailable
+        if not declared:
+            raise HTTPException(status_code=404, detail=f"unknown UI Surface: {name}")
+        feature = {"issue": declared[0].number, "title": declared[0].title, "state": declared[0].state, "dollars": "0"}
+    return {"github_available": True, "surface": name, "feature": feature}
 
 
 @router.get("/total")

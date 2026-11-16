@@ -173,3 +173,32 @@ def test_features_endpoint_exposes_completion_date_and_build_maintenance_split(s
     response = get_features(spend_engine, FakeFeatureSource({1: issue(1, state="closed", closed=closed)}))
     (f,) = response.json()["features"]
     assert (f["build_dollars"], f["maintenance_dollars"], f["completed_at"]) == ("10", "0", "2026-11-16T04:00:00Z")
+
+
+def test_feature_detail_endpoint_reports_build_and_maintenance_spend(spend_engine, tmp_path):
+    record(spend_engine, [session(tmp_path, "a", 1, *creates_issue(1, session="a"))])  # message at 03:00
+    closed = datetime(2026, 11, 16, 2, tzinfo=timezone.utc)
+    body = get_detail(spend_engine, FakeFeatureSource({1: issue(1, state="closed", closed=closed)}), 1).json()
+    assert (body["build_dollars"], body["maintenance_dollars"]) == ("0", "10")
+
+
+def test_surface_endpoint_resolves_a_feature_with_no_spend_to_zero(spend_engine):
+    source = FakeFeatureSource({1: issue(1, "Quiet", surface="quiet"), 2: issue(2, "Sub", parent=1, surface="quiet")})
+    response = get_surface(spend_engine, source, "quiet")
+    assert response.status_code == 200
+    assert response.json()["feature"] == {"issue": 1, "title": "Quiet", "state": "open", "dollars": "0"}
+
+
+def test_gh_adapter_finds_top_level_issues_declaring_a_surface():
+    gh = GhFeatureSource(
+        "o/r",
+        run=fake_gh(
+            {
+                "issues?state=all&per_page=100": "1\n2\n",
+                "issues/1": json.dumps({"title": "A", "state": "open", "body": "ui-surface: s"}),
+                "issues/2": json.dumps({"title": "B", "state": "open", "body": "ui-surface: s"}),
+                "issues/2/parent": json.dumps({"number": 1}),
+            }
+        ),
+    )
+    assert [i.number for i in gh.issues_declaring_surface("s")] == [1]

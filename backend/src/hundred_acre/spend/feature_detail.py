@@ -6,14 +6,20 @@ from decimal import Decimal
 
 from sqlalchemy import Engine, text
 
-from hundred_acre.spend.attribution import STAGES
-from hundred_acre.spend.features import FeatureSource, FeatureSourceUnavailable, IssueInfo, _infer_issue, _root
-from hundred_acre.spend.ledger import session_model_spend
+from hundred_acre.spend.attribution import STAGES, Stage
+from hundred_acre.spend.features import (
+    FeatureSource,
+    IssueInfo,
+    resolve_attribution,
+    root_issue,
+    split_build_maintenance,
+)
+from hundred_acre.spend.ledger import message_spend, session_model_spend
 
 
 @dataclass(frozen=True)
 class StageSpend:
-    stage: str
+    stage: Stage
     dollars: Decimal
 
 
@@ -33,10 +39,17 @@ class ModelSpend:
 @dataclass(frozen=True)
 class SessionSpend:
     session_id: str
-    stage: str
+    stage: Stage
     sub_issue: int
     first_seen: datetime
     dollars: Decimal
+
+
+@dataclass
+class _SessionTotal:
+    stage: Stage
+    sub_issue: int | None
+    dollars: Decimal = Decimal(0)
 
 
 @dataclass(frozen=True)
@@ -45,6 +58,8 @@ class FeatureDetail:
     title: str
     state: str
     dollars: Decimal
+    build_dollars: Decimal  # Build Spend: messages at or before the top-level issue first closed
+    maintenance_dollars: Decimal  # Maintenance Spend: messages after it first closed
     by_stage: list[StageSpend]  # pipeline order; Stages with no Spend are omitted
     by_sub_issue: list[SubIssueSpend]  # highest Spend first
     by_model: list[ModelSpend]  # highest Spend first
@@ -59,7 +74,7 @@ def feature_detail(engine: Engine, source: FeatureSource, issue: int) -> Feature
     Raises FeatureSourceUnavailable if GitHub cannot be reached.
     """
     cache: dict[int, IssueInfo | None] = {}
-    feature = _root(source, issue, cache)
+    feature = root_issue(source, issue, cache)
     if feature is None or feature.number != issue:
         return None
 
@@ -72,27 +87,30 @@ def feature_detail(engine: Engine, source: FeatureSource, issue: int) -> Feature
         }
         first_seen = {sid: t for sid, t in conn.execute(text("select id, first_seen from sessions"))}
 
-    by_session: dict[str, list] = {}  # session -> [stage, sub-issue, dollars]
+    messages = message_spend(engine)
+    by_session: dict[str, _SessionTotal] = {}
     by_model: dict[str, Decimal] = {}
+    build = maintenance = Decimal(0)
     unpriced = 0
     for sid, model, dollars, n in session_model_spend(engine):
         src, target, refs, stage = attributions.get(sid, ("inferred", None, {}, "other"))
-        if src == "manual":
-            root = _root(source, target, cache) if target is not None else None
-            sub = target
-        else:
-            root, sub, _ = _infer_issue(source, refs, cache)
-        if root is None or root.number != feature.number:
+        resolution = resolve_attribution(source, src, target, refs, cache)
+        if resolution.feature is None or resolution.feature.number != feature.number:
             continue
-        by_session.setdefault(sid, [stage, sub, Decimal(0)])[2] += dollars
+        if sid not in by_session:
+            by_session[sid] = _SessionTotal(stage, resolution.sub_issue)
+            session_build, session_maintenance = split_build_maintenance(feature.first_closed_at, messages.get(sid, []))
+            build += session_build
+            maintenance += session_maintenance
+        by_session[sid].dollars += dollars
         by_model[model] = by_model.get(model, Decimal(0)) + dollars
         unpriced += n
 
-    stage_totals: dict[str, Decimal] = {}
+    stage_totals: dict[Stage, Decimal] = {}
     sub_totals: dict[int, Decimal] = {}
-    for stage, sub, dollars in by_session.values():
-        stage_totals[stage] = stage_totals.get(stage, Decimal(0)) + dollars
-        sub_totals[sub] = sub_totals.get(sub, Decimal(0)) + dollars
+    for total in by_session.values():
+        stage_totals[total.stage] = stage_totals.get(total.stage, Decimal(0)) + total.dollars
+        sub_totals[total.sub_issue] = sub_totals.get(total.sub_issue, Decimal(0)) + total.dollars
 
     def title(number: int) -> str:
         info = cache.get(number)
@@ -104,12 +122,14 @@ def feature_detail(engine: Engine, source: FeatureSource, issue: int) -> Feature
         title=feature.title,
         state=feature.state,
         dollars=sum(stage_totals.values(), Decimal(0)),
+        build_dollars=build,
+        maintenance_dollars=maintenance,
         by_stage=[StageSpend(s, stage_totals[s]) for s in STAGES if s in stage_totals],
         by_sub_issue=[SubIssueSpend(n, title(n), d) for n, d in by_desc(sub_totals)],
         by_model=[ModelSpend(m, d) for m, d in by_desc(by_model)],
         by_session=[
-            SessionSpend(sid, stage, sub, first_seen[sid], dollars)
-            for sid, (stage, sub, dollars) in sorted(by_session.items(), key=lambda kv: kv[1][2], reverse=True)
+            SessionSpend(sid, t.stage, t.sub_issue, first_seen[sid], t.dollars)
+            for sid, t in sorted(by_session.items(), key=lambda kv: kv[1].dollars, reverse=True)
         ],
         unpriced_messages=unpriced,
     )

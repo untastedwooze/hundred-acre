@@ -9,6 +9,8 @@ type Detail = {
   title: string
   state: string
   dollars: string
+  build_dollars: string
+  maintenance_dollars: string
   unpriced_messages: number
   by_stage: (Amount & { stage: string })[]
   by_sub_issue: (Amount & { issue: number; title: string })[]
@@ -77,6 +79,9 @@ export default function FeatureDetailPage() {
       <h1>{`#${d.issue} ${d.title}`}</h1>
       <p>
         <strong>{formatDollars(d.dollars)}</strong> ({d.state})
+      </p>
+      <p>
+        Build: {formatDollars(d.build_dollars)} | Maintenance: {formatDollars(d.maintenance_dollars)}
       </p>
       {d.unpriced_messages > 0 && <p role="alert">Warning: {d.unpriced_messages} unpriced messages are not included.</p>}
       <Breakdown

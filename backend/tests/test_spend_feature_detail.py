@@ -93,3 +93,20 @@ def test_only_top_level_issues_have_a_detail_view(spend_engine):
     source = FakeFeatureSource({1: issue(1), 2: issue(2, parent=1)})
     assert feature_detail(spend_engine, source, 2) is None
     assert feature_detail(spend_engine, source, 99) is None
+
+
+def test_detail_splits_spend_into_build_and_maintenance_per_message(spend_engine, tmp_path):
+    from datetime import datetime, timezone
+
+    from transcripts import assistant_line, write_transcript
+
+    lines = [
+        assistant_line("m1", session="a", ts="2026-11-16T02:00:00.000Z", output_tokens=1_000_000),
+        assistant_line("m2", session="a", ts="2026-11-16T03:00:00.000Z", output_tokens=1_000_000),
+        assistant_line("m3", session="a", ts="2026-11-16T05:00:00.000Z", output_tokens=1_000_000),
+        *creates_issue(1, session="a"),
+    ]
+    record(spend_engine, [write_transcript(tmp_path / "a.jsonl", lines)])
+    closed = datetime(2026, 11, 16, 3, tzinfo=timezone.utc)
+    detail = feature_detail(spend_engine, FakeFeatureSource({1: issue(1, state="closed", closed=closed)}), 1)
+    assert (detail.build_dollars, detail.maintenance_dollars, detail.dollars) == (20, 10, 30)

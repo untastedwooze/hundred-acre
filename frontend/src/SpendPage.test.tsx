@@ -39,7 +39,9 @@ test("the Spend page carries the Spend badge for its own UI Surface", async () =
     Promise.resolve(
       url === "/api/spend/surfaces/spend"
         ? ok({ github_available: true, surface: "spend", feature: { issue: 1, title: "T", state: "open", dollars: "42" } })
-        : ok({ points: [], unpriced_messages: 0 }),
+        : url === "/api/spend/features"
+          ? ok({ github_available: false, features: [] })
+          : ok({ points: [], unpriced_messages: 0 }),
     ),
   );
   vi.stubGlobal("fetch", fetchMock);

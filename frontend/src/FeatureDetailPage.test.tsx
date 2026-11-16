@@ -11,6 +11,8 @@ const detail = {
   title: "Spend tracking",
   state: "open",
   dollars: "30",
+  build_dollars: "25",
+  maintenance_dollars: "5",
   unpriced_messages: 0,
   by_stage: [
     { stage: "implement", dollars: "10" },
@@ -89,4 +91,11 @@ test("says the breakdown is unavailable when the API fails", async () => {
     </MemoryRouter>,
   );
   expect(await screen.findByText(/breakdown unavailable/i)).toBeTruthy();
+});
+
+test("shows the Feature's Build Spend and Maintenance Spend", async () => {
+  renderAt("/spend/features/1", ok(detail));
+  await screen.findByRole("heading", { name: /#1 Spend tracking/ });
+  expect(screen.getByText(/Build/).textContent).toContain("$25.00");
+  expect(screen.getByText(/Maintenance/).textContent).toContain("$5.00");
 });

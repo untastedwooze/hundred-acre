@@ -58,7 +58,7 @@ function CumulativeSection() {
 }
 
 /**
- * The Spend page. Each section is self-contained and fetches its own data, so later tickets
+ * The Spend page. Each section is self-contained and fetches its own data, so later Features
  * (Feature table, drill-down, needs-review) add a section here without touching the others.
  */
 export default function SpendPage() {
