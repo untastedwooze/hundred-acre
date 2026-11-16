@@ -1,5 +1,6 @@
 """Thin HTTP layer over the Spend module."""
 
+from datetime import timezone
 from decimal import Decimal
 from functools import lru_cache
 
@@ -43,6 +44,11 @@ def get_features(
                 "title": f.title,
                 "state": f.state,
                 "dollars": _dollars(f.dollars),
+                "build_dollars": _dollars(f.build_dollars),
+                "maintenance_dollars": _dollars(f.maintenance_dollars),
+                "completed_at": f.first_closed_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if f.first_closed_at
+                else None,
                 "sessions": f.sessions,
                 "low_confidence_sessions": f.low_confidence_sessions,
             }

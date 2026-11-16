@@ -28,7 +28,7 @@ def test_features_endpoint_lists_feature_table_with_overhead(spend_engine, tmp_p
     assert response.json() == {
         "github_available": True,
         "features": [
-            {"issue": 1, "title": "Spend tracking", "state": "open", "dollars": "10", "sessions": 1, "low_confidence_sessions": 0}
+            {"issue": 1, "title": "Spend tracking", "state": "open", "dollars": "10", "build_dollars": "10", "maintenance_dollars": "0", "completed_at": None, "sessions": 1, "low_confidence_sessions": 0}
         ],
         "overhead_dollars": "5",
         "unresolved_dollars": "0",
@@ -86,3 +86,13 @@ def test_gh_adapter_reports_unreachable_github_as_unavailable():
     gh = GhFeatureSource("o/r", run=fake_gh({"issues/1": FeatureSourceUnavailable}))
     with pytest.raises(FeatureSourceUnavailable):
         gh.issue(1)
+
+
+def test_features_endpoint_exposes_completion_date_and_build_maintenance_split(spend_engine, tmp_path):
+    from datetime import datetime, timezone
+
+    record(spend_engine, [session(tmp_path, "a", 1, *creates_issue(1, session="a"))])
+    closed = datetime(2026, 11, 16, 4, tzinfo=timezone.utc)
+    response = get_features(spend_engine, FakeFeatureSource({1: issue(1, state="closed", closed=closed)}))
+    (f,) = response.json()["features"]
+    assert (f["build_dollars"], f["maintenance_dollars"], f["completed_at"]) == ("10", "0", "2026-11-16T04:00:00Z")

@@ -13,9 +13,15 @@ afterEach(() => {
 
 const ok = (body: unknown) => ({ ok: true, json: async () => body });
 
-function stubSeries(body: unknown) {
+function stubSeries(body: unknown, features: unknown = { github_available: true, features: [] }) {
   const fetchMock = vi.fn((url: string) =>
-    Promise.resolve(url === "/api/spend/series" ? ok(body) : ok({ dollars: "25", unpriced_messages: 0 })),
+    Promise.resolve(
+      url === "/api/spend/series"
+        ? ok(body)
+        : url === "/api/spend/features"
+          ? ok(features)
+          : ok({ dollars: "25", unpriced_messages: 0 }),
+    ),
   );
   vi.stubGlobal("fetch", fetchMock);
   return fetchMock;
@@ -97,4 +103,25 @@ test("/spend renders the Spend page inside the app", async () => {
   );
   expect(await screen.findByRole("heading", { name: /^spend$/i })).toBeTruthy();
   expect(await screen.findByRole("img", { name: /cumulative spend/i })).toBeTruthy();
+});
+
+test("marks each Feature's completion on the cumulative chart", async () => {
+  stubSeries(series, {
+    github_available: true,
+    features: [
+      { issue: 1, title: "Spend tracking", completed_at: "2026-11-15T00:00:00Z" },
+      { issue: 2, title: "Still open", completed_at: null },
+    ],
+  });
+  render(<SpendPage />);
+  const chart = await screen.findByRole("img", { name: /cumulative spend/i });
+  await screen.findByText(/#1 Spend tracking/, { selector: "title" });
+  expect(chart.querySelectorAll("[data-feature-marker]")).toHaveLength(1);
+});
+
+test("still draws the chart, without markers, when Feature data is unavailable", async () => {
+  stubSeries(series, { github_available: false, features: [] });
+  render(<SpendPage />);
+  const chart = await screen.findByRole("img", { name: /cumulative spend/i });
+  expect(chart.querySelectorAll("[data-feature-marker]")).toHaveLength(0);
 });

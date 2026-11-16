@@ -296,3 +296,18 @@ def cumulative_spend(engine: Engine) -> SpendSeries:
         [SeriesPoint(b.replace(tzinfo=timezone.utc), Decimal(c)) for b, c in rows],
         total_spend(engine).unpriced_messages,
     )
+
+
+def message_spend(engine: Engine) -> dict[str, list[tuple[datetime, Decimal]]]:
+    """Per Session: (timestamp, dollars) of each priced message. Unpriced messages are excluded, as in `session_spend`."""
+    cost, unpriced = _cost_sql(), _unpriced_sql()
+    sql = f"""
+        select session_id, timestamp, ({cost}) / 1000000
+        from ({_priced_messages_sql()}) priced
+        where not ({unpriced})
+    """
+    out: dict[str, list[tuple[datetime, Decimal]]] = {}
+    with engine.connect() as conn:
+        for sid, ts, dollars in conn.execute(text(sql)):
+            out.setdefault(sid, []).append((ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc), Decimal(dollars)))
+    return out

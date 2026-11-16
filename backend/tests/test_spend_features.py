@@ -31,3 +31,51 @@ def test_session_that_creates_an_issue_is_attributed_to_that_feature(spend_engin
         (1, "Spend tracking", "open", Decimal("10"))
     ]
     assert report.overhead_dollars == 0
+
+
+CLOSED = datetime(2026, 11, 16, 3, 0, tzinfo=timezone.utc)
+
+
+def test_spend_splits_into_build_and_maintenance_by_the_top_level_issue_first_closed_date(spend_engine, tmp_path):
+    record(spend_engine, [session(tmp_path, "a", 1, *creates_issue(1, session="a"))])  # message at 03:00
+    closed = datetime(2026, 11, 16, 4, tzinfo=timezone.utc)
+    (f,) = feature_spend(spend_engine, FakeFeatureSource({1: issue(1, state="closed", closed=closed)})).features
+    assert (f.build_dollars, f.maintenance_dollars, f.dollars) == (Decimal("10"), Decimal(0), Decimal("10"))
+    assert f.first_closed_at == closed
+
+
+def test_a_session_spanning_the_close_is_split_per_message_and_the_closing_instant_counts_as_build(spend_engine, tmp_path):
+    lines = [
+        assistant_line("m1", session="a", ts="2026-11-16T02:00:00.000Z", output_tokens=1_000_000),
+        assistant_line("m2", session="a", ts="2026-11-16T03:00:00.000Z", output_tokens=1_000_000),
+        assistant_line("m3", session="a", ts="2026-11-16T05:00:00.000Z", output_tokens=1_000_000),
+        *creates_issue(1, session="a"),
+    ]
+    record(spend_engine, [write_transcript(tmp_path / "a.jsonl", lines)])
+    (f,) = feature_spend(spend_engine, FakeFeatureSource({1: issue(1, state="closed", closed=CLOSED)})).features
+    assert (f.build_dollars, f.maintenance_dollars) == (Decimal("20"), Decimal("10"))
+
+
+def test_bug_sub_issue_worked_after_the_feature_closed_is_maintenance_even_if_reopened(spend_engine, tmp_path):
+    bug_session = write_transcript(
+        tmp_path / "bug.jsonl",
+        [
+            assistant_line("b1", session="bug", ts="2026-11-20T00:00:00.000Z", output_tokens=1_000_000),
+            *creates_issue(2, session="bug"),
+        ],
+    )
+    record(spend_engine, [session(tmp_path, "a", 1, *creates_issue(1, session="a")), bug_session])
+    source = FakeFeatureSource(
+        {
+            1: issue(1, state="open", closed=datetime(2026, 11, 16, 3, 30, tzinfo=timezone.utc)),  # reopened since
+            2: issue(2, parent=1),
+        }
+    )
+    (f,) = feature_spend(spend_engine, source).features
+    assert (f.build_dollars, f.maintenance_dollars) == (Decimal("10"), Decimal("10"))
+
+
+def test_a_feature_never_closed_is_all_build(spend_engine, tmp_path):
+    record(spend_engine, [session(tmp_path, "a", 1, *creates_issue(1, session="a"))])
+    (f,) = feature_spend(spend_engine, FakeFeatureSource({1: issue(1)})).features
+    assert (f.build_dollars, f.maintenance_dollars, f.first_closed_at) == (Decimal("10"), Decimal(0), None)
