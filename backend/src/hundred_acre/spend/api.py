@@ -3,7 +3,7 @@
 from decimal import Decimal
 from functools import lru_cache
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import Engine, create_engine
 
 from hundred_acre.spend import cumulative_spend, total_spend
@@ -50,6 +50,25 @@ def get_features(
         "unresolved_dollars": _dollars(report.unresolved_dollars),
         "unpriced_messages": report.unpriced_messages,
     }
+
+
+@router.get("/surfaces/{name}")
+def get_surface_spend(
+    name: str, engine: Engine = Depends(get_spend_engine), source: FeatureSource = Depends(get_feature_source)
+) -> dict:
+    """The Spend of the Feature that declares UI Surface `name`. 404 if no Feature (with Spend) declares it;
+    200 with `github_available: false` when GitHub is unreachable."""
+    report = feature_spend(engine, source)
+    if not report.github_available:
+        return {"github_available": False, "surface": name, "feature": None}
+    for f in report.features:
+        if f.ui_surface == name:
+            return {
+                "github_available": True,
+                "surface": name,
+                "feature": {"issue": f.issue, "title": f.title, "state": f.state, "dollars": _dollars(f.dollars)},
+            }
+    raise HTTPException(status_code=404, detail=f"unknown UI Surface: {name}")
 
 
 @router.get("/total")

@@ -6,6 +6,7 @@ Feature. Feature metadata is never stored: it is read through a `FeatureSource` 
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -29,6 +30,16 @@ class IssueInfo:
     parent: int | None  # parent issue number; None for a top-level issue
     state: str  # "open" | "closed"
     first_closed_at: datetime | None  # None while the issue has never been closed
+    ui_surface: str | None = None  # from a `ui-surface: <name>` line in the body; None if undeclared
+
+
+_UI_SURFACE_LINE = re.compile(r"^[ \t]*ui-surface:[ \t]*(\S+)[ \t]*$", re.IGNORECASE | re.MULTILINE)
+
+
+def parse_ui_surface(body: str | None) -> str | None:
+    """The UI Surface named by the first whole-line `ui-surface: <name>` in an issue body."""
+    match = _UI_SURFACE_LINE.search((body or "").replace("\r", ""))
+    return match.group(1) if match else None
 
 
 class FeatureSource(Protocol):
@@ -98,6 +109,7 @@ class GhFeatureSource:
             parent=json.loads(parent)["number"] if parent else None,
             state=data["state"],
             first_closed_at=first_closed,
+            ui_surface=parse_ui_surface(data.get("body")),
         )
 
 
@@ -109,6 +121,7 @@ class FeatureSpend:
     dollars: Decimal  # full precision, includes all sub-issues
     sessions: int
     low_confidence_sessions: int  # Sessions that referenced more than one Feature
+    ui_surface: str | None = None  # the UI Surface the Feature declares, if any
 
 
 @dataclass(frozen=True)
@@ -200,7 +213,7 @@ def feature_spend(engine: Engine, source: FeatureSource) -> FeatureSpendReport:
             unresolved += dollars
         totals = {}
     features = sorted(
-        (FeatureSpend(i.number, i.title, i.state, d, n, lc) for i, d, n, lc in totals.values()),
+        (FeatureSpend(i.number, i.title, i.state, d, n, lc, i.ui_surface) for i, d, n, lc in totals.values()),
         key=lambda f: f.dollars,
         reverse=True,
     )

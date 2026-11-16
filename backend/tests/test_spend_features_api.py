@@ -74,6 +74,47 @@ def test_gh_adapter_reads_title_parent_state_and_first_closed_date():
     )
 
 
+def test_gh_adapter_reads_ui_surface_from_issue_body():
+    gh = GhFeatureSource(
+        "o/r", run=fake_gh({"issues/1": json.dumps({"title": "T", "state": "open", "body": "x\nui-surface: spend\n"})})
+    )
+    assert gh.issue(1).ui_surface == "spend"
+
+
+def get_surface(engine, source, name):
+    app.dependency_overrides[get_spend_engine] = lambda: engine
+    app.dependency_overrides[get_feature_source] = lambda: source
+    try:
+        return TestClient(app).get(f"/api/spend/surfaces/{name}")
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_surface_endpoint_resolves_a_ui_surface_to_its_features_spend(spend_engine, tmp_path):
+    record(spend_engine, [session(tmp_path, "a", 1, *creates_issue(1, session="a"))])
+    source = FakeFeatureSource({1: issue(1, "Spend tracking", surface="spend")})
+    response = get_surface(spend_engine, source, "spend")
+    assert response.status_code == 200
+    assert response.json() == {
+        "github_available": True,
+        "surface": "spend",
+        "feature": {"issue": 1, "title": "Spend tracking", "state": "open", "dollars": "10"},
+    }
+
+
+def test_surface_endpoint_404s_for_an_unknown_surface(spend_engine, tmp_path):
+    record(spend_engine, [session(tmp_path, "a", 1, *creates_issue(1, session="a"))])
+    response = get_surface(spend_engine, FakeFeatureSource({1: issue(1, "Spend tracking", surface="spend")}), "nope")
+    assert response.status_code == 404
+
+
+def test_surface_endpoint_says_github_is_unavailable(spend_engine, tmp_path):
+    record(spend_engine, [session(tmp_path, "a", 1, *creates_issue(1, session="a"))])
+    response = get_surface(spend_engine, FakeFeatureSource({}, available=False), "spend")
+    assert response.status_code == 200
+    assert response.json() == {"github_available": False, "surface": "spend", "feature": None}
+
+
 def test_gh_adapter_open_top_level_issue_and_missing_issue():
     gh = GhFeatureSource("o/r", run=fake_gh({"issues/1": json.dumps({"title": "Top", "state": "open"})}))
     assert gh.issue(1) == issue(1, "Top")

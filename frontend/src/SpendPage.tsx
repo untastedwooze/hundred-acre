@@ -3,6 +3,7 @@ import FeatureTable from './FeatureTable'
 import CoverageNote from './spend/CoverageNote'
 import CumulativeSpendChart, { type SeriesPoint } from './spend/CumulativeSpendChart'
 import { formatDollars, formatLocal } from './spend/format'
+import SpendBadge from './spend/SpendBadge'
 
 type Series = { points: SeriesPoint[]; unpriced_messages: number }
 type State = { status: 'loading' } | { status: 'unavailable' } | { status: 'ok'; series: Series }
@@ -52,6 +53,7 @@ export default function SpendPage() {
   return (
     <>
       <h1>Spend</h1>
+      <SpendBadge surface="spend" />
       <CumulativeSection />
       <h2>Features</h2>
       <FeatureTable />

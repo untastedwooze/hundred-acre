@@ -21,6 +21,27 @@ function stubSeries(body: unknown) {
   return fetchMock;
 }
 
+const renderPage = () =>
+  render(
+    <MemoryRouter>
+      <SpendPage />
+    </MemoryRouter>,
+  );
+
+test("the Spend page carries the Spend badge for its own UI Surface", async () => {
+  const fetchMock = vi.fn((url: string) =>
+    Promise.resolve(
+      url === "/api/spend/surfaces/spend"
+        ? ok({ github_available: true, surface: "spend", feature: { issue: 1, title: "T", state: "open", dollars: "42" } })
+        : ok({ points: [], unpriced_messages: 0 }),
+    ),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  renderPage();
+  const link = await screen.findByRole("link", { name: /built for \$42\.00/i });
+  expect(link.getAttribute("href")).toBe("/spend/features/1");
+});
+
 const series = {
   points: [
     { timestamp: "2026-11-14T10:00:00Z", dollars: "15" },
@@ -31,7 +52,7 @@ const series = {
 
 test("renders the cumulative chart from the API series", async () => {
   const fetchMock = stubSeries(series);
-  render(<SpendPage />);
+  renderPage();
   const chart = await screen.findByRole("img", { name: /cumulative spend/i });
   expect(fetchMock).toHaveBeenCalledWith("/api/spend/series");
   expect(chart.querySelectorAll("circle")).toHaveLength(2);
@@ -40,7 +61,7 @@ test("renders the cumulative chart from the API series", async () => {
 
 test("shows the series' start and end in local time", async () => {
   stubSeries(series);
-  render(<SpendPage />);
+  renderPage();
   await screen.findByRole("img", { name: /cumulative spend/i });
   // 10:00Z is 05:00 in New York on the 14th; 03:00Z on the 16th is 22:00 on the 15th.
   expect(screen.getByText(/Nov 14, 2026, 5:00 AM/, { selector: "time" })).toBeTruthy();
@@ -49,26 +70,26 @@ test("shows the series' start and end in local time", async () => {
 
 test("shows an empty state when there is no Spend yet", async () => {
   stubSeries({ points: [], unpriced_messages: 0 });
-  render(<SpendPage />);
+  renderPage();
   expect(await screen.findByText(/no spend recorded yet/i)).toBeTruthy();
   expect(screen.queryByRole("img", { name: /cumulative spend/i })).toBeNull();
 });
 
 test("warns when unpriced usage is excluded from the series", async () => {
   stubSeries({ ...series, unpriced_messages: 4 });
-  render(<SpendPage />);
+  renderPage();
   expect(await screen.findByText(/4 unpriced messages/i)).toBeTruthy();
 });
 
 test("shows Spend as unavailable when the API fails", async () => {
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("down")));
-  render(<SpendPage />);
-  expect(await screen.findByText(/spend unavailable/i)).toBeTruthy();
+  renderPage();
+  expect((await screen.findAllByText(/spend unavailable/i)).length).toBeGreaterThan(0);
 });
 
 test("states what the figure covers and excludes", async () => {
   stubSeries(series);
-  render(<SpendPage />);
+  renderPage();
   const coverage = await screen.findByRole("note", { name: /coverage/i });
   expect(coverage.textContent).toMatch(/estimate/i);
   expect(coverage.textContent).toMatch(/local Claude Code Session transcripts/i);
