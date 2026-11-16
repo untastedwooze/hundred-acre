@@ -1,5 +1,6 @@
 """Spend module: Usage Ledger + Price Schedule in the isolated hundred_acre_spend database."""
 
+from hundred_acre.spend.autorecord import record_from_hook, sweep
 from hundred_acre.spend.features import (
     FakeFeatureSource,
     FeatureSource,
@@ -10,7 +11,15 @@ from hundred_acre.spend.features import (
     IssueInfo,
     feature_spend,
 )
-from hundred_acre.spend.ledger import RecordResult, SpendTotal, record, total_spend
+from hundred_acre.spend.ledger import (
+    RecordResult,
+    SeriesPoint,
+    SpendSeries,
+    SpendTotal,
+    cumulative_spend,
+    record,
+    total_spend,
+)
 
 __all__ = [
     "FakeFeatureSource",
@@ -21,8 +30,13 @@ __all__ = [
     "GhFeatureSource",
     "IssueInfo",
     "RecordResult",
+    "SeriesPoint",
+    "SpendSeries",
     "SpendTotal",
+    "cumulative_spend",
     "feature_spend",
     "record",
+    "record_from_hook",
+    "sweep",
     "total_spend",
 ]

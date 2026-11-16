@@ -6,7 +6,7 @@ from functools import lru_cache
 from fastapi import APIRouter, Depends
 from sqlalchemy import Engine, create_engine
 
-from hundred_acre.spend import total_spend
+from hundred_acre.spend import cumulative_spend, total_spend
 from hundred_acre.spend.db import spend_database_url
 from hundred_acre.spend.features import FeatureSource, GhFeatureSource, feature_spend
 
@@ -58,4 +58,16 @@ def get_total_spend(engine: Engine = Depends(get_spend_engine)) -> dict[str, str
     return {
         "dollars": format(total.dollars.normalize(), "f"),  # full precision; the UI rounds to the cent
         "unpriced_messages": total.unpriced_messages,
+    }
+
+
+@router.get("/series")
+def get_spend_series(engine: Engine = Depends(get_spend_engine)) -> dict:
+    series = cumulative_spend(engine)
+    return {
+        "points": [
+            {"timestamp": p.timestamp.strftime("%Y-%m-%dT%H:%M:%SZ"), "dollars": format(p.dollars.normalize(), "f")}
+            for p in series.points
+        ],
+        "unpriced_messages": series.unpriced_messages,
     }

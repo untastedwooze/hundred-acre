@@ -59,7 +59,7 @@ test("says Feature data is unavailable when GitHub is unreachable", async () => 
 test("says Spend by Feature is unavailable when the API fails", async () => {
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("down")));
   render(<FeatureTable />);
-  expect(await screen.findByText(/feature spend unavailable/i)).toBeTruthy();
+  expect(await screen.findByText(/feature breakdown unavailable/i)).toBeTruthy();
 });
 
 test("warns about unpriced usage", async () => {

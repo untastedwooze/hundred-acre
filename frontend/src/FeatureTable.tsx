@@ -31,13 +31,13 @@ export default function FeatureTable() {
   }, [])
 
   if (state.status === 'loading') return <p>Loading Feature Spend...</p>
-  if (state.status === 'unavailable') return <p>Feature Spend unavailable</p>
+  if (state.status === 'unavailable') return <p>Feature breakdown unavailable</p>
 
   const { report } = state
   if (!report.github_available) {
     return (
       <p>
-        Feature Spend unavailable: GitHub is unreachable ({money(report.unresolved_dollars)} of Spend is waiting to be
+        Feature breakdown unavailable: GitHub is unreachable ({money(report.unresolved_dollars)} of Spend is waiting to be
         attributed).
       </p>
     )
