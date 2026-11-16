@@ -62,3 +62,7 @@ API: `GET /api/spend/total` returns `{"dollars": "<full precision>", "unpriced_m
 ## Automatic recording
 
 `.claude/settings.json` registers a `Stop` (turn end) and `SessionEnd` hook that runs `spend hook` in the background; it always exits 0 immediately. Failed recordings are queued in `~/.local/state/hundred-acre/spend-retry-queue` (override with `SPEND_QUEUE_FILE`) and retried on the next run. To recover gaps or backfill history (including git worktrees): `cd backend && uv run spend sweep`.
+
+## Backups
+
+Nightly offsite backup of `hundred_acre_spend` (systemd user timer, restore steps): see [ops/backup/README.md](ops/backup/README.md).
