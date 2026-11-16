@@ -1,0 +1,7 @@
+[Unit]
+Description=Offsite backup of hundred_acre_spend
+OnFailure=hundred-acre-spend-backup-failed.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/honey-tree/hundred-acre/ops/backup/spend-backup.sh
