@@ -134,7 +134,7 @@ test("marks each Feature's completion on the cumulative chart", async () => {
       { issue: 2, title: "Still open", completed_at: null },
     ],
   });
-  render(<SpendPage />);
+  renderPage();
   const chart = await screen.findByRole("img", { name: /cumulative spend/i });
   await screen.findByText(/#1 Spend tracking/, { selector: "title" });
   expect(chart.querySelectorAll("[data-feature-marker]")).toHaveLength(1);

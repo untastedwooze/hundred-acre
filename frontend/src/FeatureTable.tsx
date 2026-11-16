@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 
 type Feature = {
   issue: number
@@ -64,7 +65,9 @@ export default function FeatureTable() {
         <tbody>
           {sorted.map((f) => (
             <tr key={f.issue}>
-              <td>{`#${f.issue} ${f.title}`}</td>
+              <td>
+                <Link to={`/spend/features/${f.issue}`}>{`#${f.issue} ${f.title}`}</Link>
+              </td>
               <td>{f.state}</td>
               <td>{money(f.dollars)}</td>
               <td>{money(f.build_dollars)}</td>

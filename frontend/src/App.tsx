@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Route, Routes } from 'react-router-dom'
+import FeatureDetailPage from './FeatureDetailPage'
 import Header from './Header'
 import SpendPage from './SpendPage'
 
@@ -27,6 +28,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/spend" element={<SpendPage />} />
+          <Route path="/spend/features/:issue" element={<FeatureDetailPage />} />
         </Routes>
       </main>
     </>

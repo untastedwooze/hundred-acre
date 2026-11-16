@@ -1,5 +1,6 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
 import FeatureTable from "./FeatureTable";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -38,7 +39,7 @@ test("lists Features with live Spend to the cent, open state, and an Overhead ro
     ...base,
     features: [feature(1, "Spend tracking", "12.345"), feature(2, "Backtester", "3", "closed")],
   });
-  render(<FeatureTable />);
+  render(<FeatureTable />, { wrapper: MemoryRouter });
   expect(await screen.findByText("#1 Spend tracking")).toBeTruthy();
   expect(fetchMock).toHaveBeenCalledWith("/api/spend/features");
   expect(screen.getAllByText("$12.35").length).toBeGreaterThan(0);
@@ -50,7 +51,7 @@ test("lists Features with live Spend to the cent, open state, and an Overhead ro
 
 test("sorts by Spend when the Spend header is clicked", async () => {
   stubFeatures({ ...base, features: [feature(1, "Big", "50"), feature(2, "Small", "1"), feature(3, "Mid", "20")] });
-  render(<FeatureTable />);
+  render(<FeatureTable />, { wrapper: MemoryRouter });
   await screen.findByText("#1 Big");
   expect(rowTitles().slice(0, 3)).toEqual(["#1 Big", "#3 Mid", "#2 Small"]);
   fireEvent.click(screen.getByRole("button", { name: /spend/i }));
@@ -59,21 +60,28 @@ test("sorts by Spend when the Spend header is clicked", async () => {
 
 test("says Feature data is unavailable when GitHub is unreachable", async () => {
   stubFeatures({ ...base, github_available: false, features: [], unresolved_dollars: "10" });
-  render(<FeatureTable />);
+  render(<FeatureTable />, { wrapper: MemoryRouter });
   expect(await screen.findByText(/GitHub is unreachable/i)).toBeTruthy();
   expect(screen.queryByRole("table")).toBeNull();
 });
 
 test("says Spend by Feature is unavailable when the API fails", async () => {
   vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("down")));
-  render(<FeatureTable />);
+  render(<FeatureTable />, { wrapper: MemoryRouter });
   expect(await screen.findByText(/feature breakdown unavailable/i)).toBeTruthy();
 });
 
 test("warns about unpriced usage", async () => {
   stubFeatures({ ...base, unpriced_messages: 2, features: [] });
-  render(<FeatureTable />);
+  render(<FeatureTable />, { wrapper: MemoryRouter });
   expect(await screen.findByText(/2 unpriced/i)).toBeTruthy();
+});
+
+test("links each Feature row to its detail view", async () => {
+  stubFeatures({ ...base, features: [feature(7, "Backtester", "3")] });
+  render(<FeatureTable />, { wrapper: MemoryRouter });
+  const link = await screen.findByRole("link", { name: "#7 Backtester" });
+  expect(link.getAttribute("href")).toBe("/spend/features/7");
 });
 
 test("shows Build Spend and Maintenance Spend next to the total for each Feature", async () => {
@@ -81,7 +89,7 @@ test("shows Build Spend and Maintenance Spend next to the total for each Feature
     ...base,
     features: [feature(1, "Spend tracking", "12", "closed", { build_dollars: "10", maintenance_dollars: "2" })],
   });
-  render(<FeatureTable />);
+  render(<FeatureTable />, { wrapper: MemoryRouter });
   await screen.findByText("#1 Spend tracking");
   const headers = screen.getAllByRole("columnheader").map((h) => h.textContent);
   expect(headers).toEqual(expect.arrayContaining(["Build", "Maintenance"]));

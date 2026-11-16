@@ -92,3 +92,18 @@ def creates_issue(number: int, *, tool_id: str = "t1", session: str = "sess-1") 
         bash_call("gh issue create --title X --body Y", tool_id=tool_id, session=session),
         tool_output(f"https://github.com/o/r/issues/{number}\n", tool_id=tool_id, session=session),
     ]
+
+
+def skill_call(skill: str, *, tool_id: str = "sk1", session: str = "sess-1") -> dict:
+    """An assistant line carrying a Skill tool call."""
+    return {
+        "type": "assistant",
+        "sessionId": session,
+        "timestamp": "2026-11-16T03:00:00.000Z",
+        "message": {"content": [{"type": "tool_use", "id": tool_id, "name": "Skill", "input": {"skill": skill}}]},
+    }
+
+
+def slash_command(name: str, *, session: str = "sess-1") -> dict:
+    """A user line produced by typing a slash command."""
+    return text_line(f"<command-name>/{name}</command-name>\n<command-args></command-args>", session=session)
