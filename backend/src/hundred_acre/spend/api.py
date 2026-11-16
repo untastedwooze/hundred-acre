@@ -43,6 +43,11 @@ def get_features(
                 "title": f.title,
                 "state": f.state,
                 "dollars": _dollars(f.dollars),
+                "build_dollars": _dollars(f.build_dollars),
+                "maintenance_dollars": _dollars(f.maintenance_dollars),
+                "completed_at": f.first_closed_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                if f.first_closed_at
+                else None,
                 "sessions": f.sessions,
                 "low_confidence_sessions": f.low_confidence_sessions,
             }
@@ -87,6 +92,25 @@ def get_feature_detail(
             for s in detail.by_session
         ],
     }
+
+
+@router.get("/surfaces/{name}")
+def get_surface_spend(
+    name: str, engine: Engine = Depends(get_spend_engine), source: FeatureSource = Depends(get_feature_source)
+) -> dict:
+    """The Spend of the Feature that declares UI Surface `name`. 404 if no Feature (with Spend) declares it;
+    200 with `github_available: false` when GitHub is unreachable."""
+    report = feature_spend(engine, source)
+    if not report.github_available:
+        return {"github_available": False, "surface": name, "feature": None}
+    for f in report.features:
+        if f.ui_surface == name:
+            return {
+                "github_available": True,
+                "surface": name,
+                "feature": {"issue": f.issue, "title": f.title, "state": f.state, "dollars": _dollars(f.dollars)},
+            }
+    raise HTTPException(status_code=404, detail=f"unknown UI Surface: {name}")
 
 
 @router.get("/total")

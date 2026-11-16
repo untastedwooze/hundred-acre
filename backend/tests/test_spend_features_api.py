@@ -28,7 +28,7 @@ def test_features_endpoint_lists_feature_table_with_overhead(spend_engine, tmp_p
     assert response.json() == {
         "github_available": True,
         "features": [
-            {"issue": 1, "title": "Spend tracking", "state": "open", "dollars": "10", "sessions": 1, "low_confidence_sessions": 0}
+            {"issue": 1, "title": "Spend tracking", "state": "open", "dollars": "10", "build_dollars": "10", "maintenance_dollars": "0", "completed_at": None, "sessions": 1, "low_confidence_sessions": 0}
         ],
         "overhead_dollars": "5",
         "unresolved_dollars": "0",
@@ -72,6 +72,47 @@ def test_gh_adapter_reads_title_parent_state_and_first_closed_date():
     assert gh.issue(7) == issue(
         7, "Features", parent=1, state="closed", closed=datetime(2026, 11, 18, 9, tzinfo=timezone.utc)
     )
+
+
+def test_gh_adapter_reads_ui_surface_from_issue_body():
+    gh = GhFeatureSource(
+        "o/r", run=fake_gh({"issues/1": json.dumps({"title": "T", "state": "open", "body": "x\nui-surface: spend\n"})})
+    )
+    assert gh.issue(1).ui_surface == "spend"
+
+
+def get_surface(engine, source, name):
+    app.dependency_overrides[get_spend_engine] = lambda: engine
+    app.dependency_overrides[get_feature_source] = lambda: source
+    try:
+        return TestClient(app).get(f"/api/spend/surfaces/{name}")
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_surface_endpoint_resolves_a_ui_surface_to_its_features_spend(spend_engine, tmp_path):
+    record(spend_engine, [session(tmp_path, "a", 1, *creates_issue(1, session="a"))])
+    source = FakeFeatureSource({1: issue(1, "Spend tracking", surface="spend")})
+    response = get_surface(spend_engine, source, "spend")
+    assert response.status_code == 200
+    assert response.json() == {
+        "github_available": True,
+        "surface": "spend",
+        "feature": {"issue": 1, "title": "Spend tracking", "state": "open", "dollars": "10"},
+    }
+
+
+def test_surface_endpoint_404s_for_an_unknown_surface(spend_engine, tmp_path):
+    record(spend_engine, [session(tmp_path, "a", 1, *creates_issue(1, session="a"))])
+    response = get_surface(spend_engine, FakeFeatureSource({1: issue(1, "Spend tracking", surface="spend")}), "nope")
+    assert response.status_code == 404
+
+
+def test_surface_endpoint_says_github_is_unavailable(spend_engine, tmp_path):
+    record(spend_engine, [session(tmp_path, "a", 1, *creates_issue(1, session="a"))])
+    response = get_surface(spend_engine, FakeFeatureSource({}, available=False), "spend")
+    assert response.status_code == 200
+    assert response.json() == {"github_available": False, "surface": "spend", "feature": None}
 
 
 def test_gh_adapter_open_top_level_issue_and_missing_issue():
@@ -121,3 +162,14 @@ def test_feature_detail_endpoint_is_404_for_a_sub_issue_or_unknown_issue(spend_e
 def test_feature_detail_endpoint_says_github_is_unavailable_instead_of_failing(spend_engine):
     response = get_detail(spend_engine, FakeFeatureSource({}, available=False), 1)
     assert response.status_code == 200 and response.json() == {"github_available": False}
+
+
+
+def test_features_endpoint_exposes_completion_date_and_build_maintenance_split(spend_engine, tmp_path):
+    from datetime import datetime, timezone
+
+    record(spend_engine, [session(tmp_path, "a", 1, *creates_issue(1, session="a"))])
+    closed = datetime(2026, 11, 16, 4, tzinfo=timezone.utc)
+    response = get_features(spend_engine, FakeFeatureSource({1: issue(1, state="closed", closed=closed)}))
+    (f,) = response.json()["features"]
+    assert (f["build_dollars"], f["maintenance_dollars"], f["completed_at"]) == ("10", "0", "2026-11-16T04:00:00Z")

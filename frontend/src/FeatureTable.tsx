@@ -6,6 +6,8 @@ type Feature = {
   title: string
   state: string
   dollars: string
+  build_dollars: string
+  maintenance_dollars: string
   sessions: number
   low_confidence_sessions: number
 }
@@ -56,6 +58,8 @@ export default function FeatureTable() {
             <th aria-sort={descending ? 'descending' : 'ascending'}>
               <button onClick={() => setDescending(!descending)}>Spend {descending ? '▼' : '▲'}</button>
             </th>
+            <th>Build</th>
+            <th>Maintenance</th>
           </tr>
         </thead>
         <tbody>
@@ -66,12 +70,16 @@ export default function FeatureTable() {
               </td>
               <td>{f.state}</td>
               <td>{money(f.dollars)}</td>
+              <td>{money(f.build_dollars)}</td>
+              <td>{money(f.maintenance_dollars)}</td>
             </tr>
           ))}
           <tr>
             <td>Overhead</td>
             <td></td>
             <td>{money(report.overhead_dollars)}</td>
+            <td></td>
+            <td></td>
           </tr>
         </tbody>
       </table>
