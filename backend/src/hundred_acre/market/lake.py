@@ -47,6 +47,13 @@ CREATE TABLE IF NOT EXISTS lake.adjustment_factors (
     security_id BIGINT, trading_date DATE, split_factor DOUBLE, total_return_factor DOUBLE
 )"""
 
+_CREATE_STATISTICS = """
+CREATE TABLE IF NOT EXISTS lake.daily_security_statistics (
+    security_id BIGINT, trading_date DATE, realized_volatility DOUBLE, overnight_return DOUBLE, dollar_volume DOUBLE,
+    avg_volume_20 DOUBLE, avg_volume_60 DOUBLE, method VARCHAR, parameters VARCHAR, source_fingerprint VARCHAR,
+    source_snapshot BIGINT
+)"""
+
 BASES = ("none", "split", "total_return")
 
 
@@ -83,6 +90,7 @@ class Lake:
             )
             con.execute(_CREATE_BARS)
             con.execute(_CREATE_FACTORS)
+            con.execute(_CREATE_STATISTICS)
             if new:
                 con.execute("ALTER TABLE lake.daily_bars SET PARTITIONED BY (year(trading_date))")
             new_intraday = (
