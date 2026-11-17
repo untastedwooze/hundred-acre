@@ -4,7 +4,8 @@ Tests fill `FakeMarketDataSource` with scenarios, like `FakeFeatureSource` for G
 """
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
 from typing import Protocol
 
 
@@ -78,6 +79,12 @@ class MarketDataSource(Protocol):
         """One ticker's Daily Bars over a date range."""
         ...
 
+    def intraday_aggregates(
+        self, ticker: str, start: date, end: date, *, adjusted: bool
+    ) -> list[tuple[datetime, BarData]]:
+        """One ticker's five-minute Bars (all Trading Sessions) for New York calendar days `start` to `end`, by UTC start."""
+        ...
+
     def tickers(self) -> list[TickerRecord]:
         """Tickers reference data."""
         ...
@@ -103,6 +110,8 @@ class FakeMarketDataSource:
     grouped_daily_bars: dict[date, list[BarData]] = field(default_factory=dict)
     adjusted_grouped_daily_bars: dict[date, list[BarData]] = field(default_factory=dict)
     aggregate_bars: dict[str, list[tuple[date, BarData]]] = field(default_factory=dict)
+    intraday_bars: dict[str, list[tuple[datetime, BarData]]] = field(default_factory=dict)
+    intraday_calls: list[tuple[str, date, date]] = field(default_factory=list)  # (ticker, start, end) per call
     events: dict[str, list[TickerEvent]] = field(default_factory=dict)
     split_list: list[Split] = field(default_factory=list)
     dividend_list: list[Dividend] = field(default_factory=list)
@@ -129,6 +138,18 @@ class FakeMarketDataSource:
         if ticker in self.failing_tickers:
             raise MarketDataUnavailable(f"fake source failed for {ticker}")
         return [(d, b) for d, b in self.aggregate_bars.get(ticker, []) if start <= d <= end]
+
+    def intraday_aggregates(
+        self, ticker: str, start: date, end: date, *, adjusted: bool
+    ) -> list[tuple[datetime, BarData]]:
+        self._check()
+        self.intraday_calls.append((ticker, start, end))
+        if ticker in self.failing_tickers:
+            raise MarketDataUnavailable(f"fake source failed for {ticker}")
+        ny = ZoneInfo("America/New_York")
+        return sorted(
+            (t, b) for t, b in self.intraday_bars.get(ticker, []) if start <= t.astimezone(ny).date() <= end
+        )
 
     def tickers(self) -> list[TickerRecord]:
         self._check()

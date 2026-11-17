@@ -7,7 +7,7 @@ from datetime import date
 from sqlalchemy import Engine, create_engine
 
 from hundred_acre.market.db import market_database_url, migrate
-from hundred_acre.market.jobs import load_daily_bars
+from hundred_acre.market.jobs import load_daily_bars, nightly_intraday_bars
 from hundred_acre.market.lake import Lake
 from hundred_acre.market.ratelimit import Priority, RateLimiter, ThrottledSource
 from hundred_acre.market.reference import sync_reference
@@ -57,6 +57,9 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
         elif args.command == "nightly":
             result = load_daily_bars(source, args.as_of, engine=engine, lake=lake)
             print(f"loaded {result.bars_written} daily bars for {args.as_of}")
+            watchlist_source = source.with_priority(Priority.NIGHTLY_WATCHLIST) if isinstance(source, ThrottledSource) else source
+            nightly_intraday_bars(watchlist_source, args.as_of, engine=engine, lake=lake)
+            print(f"loaded watchlist intraday bars for {args.as_of}")
         else:
             from hundred_acre.market import jobs
 

@@ -10,7 +10,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from concurrent.futures import Future
-from datetime import date
+from datetime import date, datetime
 from enum import IntEnum
 
 from hundred_acre.market.source import (
@@ -98,6 +98,11 @@ class ThrottledSource:
 
     def aggregates(self, ticker: str, start: date, end: date, *, adjusted: bool) -> list[tuple[date, BarData]]:
         return self._do(self._inner.aggregates, ticker, start, end, adjusted=adjusted)
+
+    def intraday_aggregates(
+        self, ticker: str, start: date, end: date, *, adjusted: bool
+    ) -> list[tuple[datetime, BarData]]:
+        return self._do(self._inner.intraday_aggregates, ticker, start, end, adjusted=adjusted)
 
     def tickers(self) -> list[TickerRecord]:
         return self._do(self._inner.tickers)
