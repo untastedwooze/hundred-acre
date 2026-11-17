@@ -117,11 +117,11 @@ class MassiveSource:
 
     def splits(self, since: date) -> list[Split]:
         rows = self._paged("/v3/reference/splits", {"execution_date.gte": since.isoformat(), "limit": 1000})
-        return [Split(r["ticker"], _date(r["execution_date"]), r["split_from"], r["split_to"]) for r in rows]
+        return [Split(r["ticker"], _date(r["execution_date"]), r["split_from"], r["split_to"], r.get("id")) for r in rows]
 
     def dividends(self, since: date) -> list[Dividend]:
         rows = self._paged("/v3/reference/dividends", {"ex_dividend_date.gte": since.isoformat(), "limit": 1000})
-        return [Dividend(r["ticker"], _date(r["ex_dividend_date"]), r["cash_amount"]) for r in rows]
+        return [Dividend(r["ticker"], _date(r["ex_dividend_date"]), r["cash_amount"], r.get("id")) for r in rows]
 
     def upcoming_market_holidays(self) -> list[MarketHoliday]:
         body = self._get("/v1/marketstatus/upcoming")

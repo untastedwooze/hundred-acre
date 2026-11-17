@@ -52,6 +52,7 @@ class Split:
     execution_date: date
     split_from: float
     split_to: float
+    id: str | None = None  # Massive's record id; a revised record keeps its id
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class Dividend:
     ticker: str
     ex_dividend_date: date
     cash_amount: float
+    id: str | None = None  # Massive's record id; a revised record keeps its id
 
 
 @dataclass(frozen=True)
