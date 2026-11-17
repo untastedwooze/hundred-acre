@@ -9,7 +9,7 @@ from sqlalchemy import Engine, create_engine, text
 from hundred_acre.market.adjustments import rebuild_adjustment_factors, sync_corporate_actions
 from hundred_acre.market.db import market_database_url, migrate
 from hundred_acre.market.delistings import sync_delistings
-from hundred_acre.market.jobs import load_daily_bars
+from hundred_acre.market.jobs import load_daily_bars, nightly_intraday_bars
 from hundred_acre.market.lake import Lake
 from hundred_acre.market.ratelimit import Priority, RateLimiter, ThrottledSource
 from hundred_acre.market.reference import sync_reference
@@ -66,6 +66,9 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
             for security_id in sorted(with_actions & set(result.security_ids.values())):
                 rebuild_adjustment_factors(engine, lake, security_id)
             sync_delistings(engine, lake)
+            watchlist_source = source.with_priority(Priority.NIGHTLY_WATCHLIST) if isinstance(source, ThrottledSource) else source
+            nightly_intraday_bars(watchlist_source, args.as_of, engine=engine, lake=lake)
+            print(f"loaded watchlist intraday bars for {args.as_of}")
         else:
             from hundred_acre.market import jobs
 

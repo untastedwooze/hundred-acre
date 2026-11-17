@@ -28,6 +28,8 @@ packages = ["src/hundred_acre"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not perf'"
+markers = ["perf: opt-in performance checks, run with `pytest -m perf`"]
 
 [dependency-groups]
 dev = [

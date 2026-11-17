@@ -21,6 +21,20 @@ BAR_SCHEMA = {
     "fetched_at": pl.Datetime("us", "UTC"),
 }
 
+INTRADAY_COLUMNS = (
+    "security_id", "trading_date", "bar_start", "trading_session", "open", "high", "low", "close", "volume", "vwap",
+    "trade_count", "source", "fetched_at",
+)
+
+INTRADAY_SCHEMA = {**BAR_SCHEMA, "bar_start": pl.Datetime("us", "UTC"), "trading_session": pl.String}
+
+_CREATE_INTRADAY = """
+CREATE TABLE IF NOT EXISTS lake.intraday_bars (
+    security_id BIGINT, trading_date DATE, bar_start TIMESTAMPTZ, trading_session VARCHAR,
+    open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE, vwap DOUBLE,
+    trade_count BIGINT, source VARCHAR, fetched_at TIMESTAMPTZ
+)"""
+
 _CREATE_BARS = """
 CREATE TABLE IF NOT EXISTS lake.daily_bars (
     security_id BIGINT, trading_date DATE,
@@ -71,6 +85,16 @@ class Lake:
             con.execute(_CREATE_FACTORS)
             if new:
                 con.execute("ALTER TABLE lake.daily_bars SET PARTITIONED BY (year(trading_date))")
+            new_intraday = (
+                con.execute(
+                    "SELECT count(*) FROM duckdb_tables() WHERE database_name = 'lake' AND table_name = 'intraday_bars'"
+                ).fetchone()[0]
+                == 0
+            )
+            con.execute(_CREATE_INTRADAY)
+            if new_intraday:
+                con.execute("ALTER TABLE lake.intraday_bars SET PARTITIONED BY (year(trading_date), month(trading_date))")
+                con.execute("ALTER TABLE lake.intraday_bars SET SORTED BY (security_id, bar_start)")
             yield con
         finally:
             con.close()
@@ -174,3 +198,46 @@ def read_bars(
     from hundred_acre.market.adjustments import apply_adjustment
 
     return apply_adjustment(lake, df, basis).select(wanted)
+
+
+def replace_intraday_bars(lake: Lake, bars: pl.DataFrame, security_ids: Sequence[int], days: Sequence[date]) -> None:
+    """Replace `security_ids`' Intraday Bars on trading `days` with `bars` in one transaction, sorted by Security then bar_start."""
+    with lake.connect() as con:
+        con.register("incoming", bars.select(INTRADAY_COLUMNS).sort("security_id", "bar_start").to_arrow())
+        con.execute("BEGIN")
+        con.execute(
+            "DELETE FROM lake.intraday_bars WHERE list_contains(?, security_id) AND list_contains(?, trading_date)",
+            [list(security_ids), list(days)],
+        )
+        con.execute("INSERT INTO lake.intraday_bars SELECT * FROM incoming ORDER BY security_id, bar_start")
+        con.execute("COMMIT")
+
+
+def read_intraday_bars(
+    lake: Lake,
+    security_ids: Sequence[int],
+    start: date,
+    end: date,
+    columns: Sequence[str] | None = None,
+    sessions: str | Sequence[str] | None = "regular",
+    snapshot: int | None = None,
+) -> pl.DataFrame:
+    """Unadjusted five-minute Bars for `security_ids` with `start <= trading_date <= end`, by Security then bar_start.
+
+    Reads the regular Trading Session by default; `sessions` names one or several sessions, or None for all of them.
+    """
+    wanted = list(columns) if columns is not None else list(INTRADAY_COLUMNS)
+    unknown = set(wanted) - set(INTRADAY_COLUMNS)
+    if unknown:
+        raise ValueError(f"unknown Bar columns: {sorted(unknown)}")
+    chosen = [sessions] if isinstance(sessions, str) else None if sessions is None else list(sessions)
+    at = f" AT (VERSION => {int(snapshot)})" if snapshot is not None else ""
+    session_filter = "" if chosen is None else " AND list_contains(?, trading_session)"
+    params = [list(security_ids), start, end] + ([chosen] if chosen is not None else [])
+    with lake.connect() as con:
+        return con.sql(
+            f"SELECT {', '.join(wanted)} FROM lake.intraday_bars{at} "
+            f"WHERE list_contains(?, security_id) AND trading_date BETWEEN ? AND ?{session_filter} "
+            "ORDER BY security_id, bar_start",
+            params=params,
+        ).pl()

@@ -44,6 +44,19 @@ def test_nightly_syncs_corporate_actions_and_delistings_after_loading_bars(marke
     assert delisting(market_engine, ids["OLD"]).cash_per_share == 5.0
 
 
+def test_nightly_command_also_loads_watchlist_intraday_bars(market_engine, lake):
+    from datetime import datetime, timezone
+
+    from hundred_acre.market.lake import read_intraday_bars
+    from hundred_acre.market.watchlist import add_to_watchlist
+
+    s = src()
+    s.intraday_bars["AAPL"] = [(datetime(2026, 11, 13, 14, 30, tzinfo=timezone.utc), BarData("AAPL", 1, 1, 1, 1, 5.0, 1, 1))]
+    sid = add_to_watchlist(s, market_engine, lake, "AAPL", as_of=date(2026, 11, 12))
+    assert main(["nightly", "--as-of", "2026-11-13"], source=s, engine=market_engine, lake=lake) == 0
+    assert read_intraday_bars(lake, [sid], DAY, DAY).height == 1
+
+
 def test_reference_sync_command_creates_securities(market_engine, lake):
     assert main(["reference-sync", "--as-of", "2026-11-13"], source=src(), engine=market_engine, lake=lake) == 0
     with market_engine.connect() as c:

@@ -9,13 +9,15 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from hundred_acre.market.source import (
     BarData, Dividend, MarketDataUnavailable, MarketHoliday, Split, TickerEvent, TickerRecord,
 )
 
 BASE_URL = "https://api.massive.com"
+
+_INTRADAY_CHUNK_DAYS = 120  # ~85 trading days x <= 288 five-minute Bars stays under the 50000 limit
 
 Transport = Callable[[str, dict, dict], dict]  # (path, params, headers) -> parsed JSON
 
@@ -96,6 +98,26 @@ class MassiveSource:
             (datetime.fromtimestamp(r["t"] / 1000, timezone.utc).date(), _bar({**r, "T": ticker}))
             for r in body.get("results") or []
         ]
+
+    def intraday_aggregates(
+        self, ticker: str, start: date, end: date, *, adjusted: bool
+    ) -> list[tuple[datetime, BarData]]:
+        """Five-minute Bars; ranges are split so each request stays under Massive's 50000-result limit."""
+        out: list[tuple[datetime, BarData]] = []
+        chunk_start = start
+        while chunk_start <= end:
+            chunk_end = min(chunk_start + timedelta(days=_INTRADAY_CHUNK_DAYS - 1), end)
+            body = self._get(
+                f"/v2/aggs/ticker/{urllib.parse.quote(ticker)}/range/5/minute/"
+                f"{chunk_start.isoformat()}/{chunk_end.isoformat()}",
+                {"adjusted": str(adjusted).lower(), "sort": "asc", "limit": 50000},
+            )
+            out.extend(
+                (datetime.fromtimestamp(r["t"] / 1000, timezone.utc), _bar({**r, "T": ticker}))
+                for r in body.get("results") or []
+            )
+            chunk_start = chunk_end + timedelta(days=1)
+        return out
 
     def tickers(self) -> list[TickerRecord]:
         out = []
