@@ -16,6 +16,7 @@ dependencies = [
 
 [project.scripts]
 spend = "hundred_acre.spend.cli:main"
+market = "hundred_acre.market.cli:main"
 
 [build-system]
 requires = ["hatchling"]
