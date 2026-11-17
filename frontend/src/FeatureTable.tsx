@@ -1,0 +1,103 @@
+import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
+
+type Feature = {
+  issue: number
+  title: string
+  state: string
+  dollars: string
+  build_dollars: string
+  maintenance_dollars: string
+  sessions: number
+  low_confidence_sessions: number
+}
+type Report = {
+  github_available: boolean
+  features: Feature[]
+  overhead_dollars: string
+  unresolved_dollars: string
+  unpriced_messages: number
+}
+type State = { status: 'loading' } | { status: 'unavailable' } | { status: 'ok'; report: Report }
+
+const money = (dollars: string) => `$${Number(dollars).toFixed(2)}`
+
+export default function FeatureTable() {
+  const [state, setState] = useState<State>({ status: 'loading' })
+  const [descending, setDescending] = useState(true)
+
+  useEffect(() => {
+    fetch('/api/spend/features')
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad response'))))
+      .then((report: Report) => setState({ status: 'ok', report }))
+      .catch(() => setState({ status: 'unavailable' }))
+  }, [])
+
+  if (state.status === 'loading') return <p>Loading Feature Spend...</p>
+  if (state.status === 'unavailable') return <p>Feature breakdown unavailable</p>
+
+  const { report } = state
+  if (!report.github_available && report.features.length === 0) {
+    return (
+      <p>
+        Feature breakdown unavailable: GitHub is unreachable ({money(report.unresolved_dollars)} of Spend is waiting to be
+        attributed).
+      </p>
+    )
+  }
+
+  const sorted = [...report.features].sort((a, b) => (Number(a.dollars) - Number(b.dollars)) * (descending ? -1 : 1))
+  return (
+    <section>
+      {!report.github_available && (
+        <p>
+          Feature breakdown incomplete: GitHub is unreachable ({money(report.unresolved_dollars)} of Spend is waiting to be
+          attributed).
+        </p>
+      )}
+      {report.unpriced_messages > 0 && <p>Warning: {report.unpriced_messages} unpriced messages are not included.</p>}
+      <table>
+        <thead>
+          <tr>
+            <th>Feature</th>
+            <th>State</th>
+            <th aria-sort={descending ? 'descending' : 'ascending'}>
+              <button onClick={() => setDescending(!descending)}>Spend {descending ? '▼' : '▲'}</button>
+            </th>
+            <th>Build</th>
+            <th>Maintenance</th>
+          </tr>
+        </thead>
+        <tbody>
+          {sorted.map((f) => (
+            <tr key={f.issue}>
+              <td>
+                <Link to={`/spend/features/${f.issue}`}>{`#${f.issue} ${f.title}`}</Link>
+              </td>
+              <td>{f.state}</td>
+              <td>{money(f.dollars)}</td>
+              <td>{money(f.build_dollars)}</td>
+              <td>{money(f.maintenance_dollars)}</td>
+            </tr>
+          ))}
+          {report.unpriced_messages > 0 && (
+            <tr>
+              <td>Unpriced usage</td>
+              <td></td>
+              <td>{report.unpriced_messages} messages not priced</td>
+              <td></td>
+              <td></td>
+            </tr>
+          )}
+          <tr>
+            <td>Overhead</td>
+            <td></td>
+            <td>{money(report.overhead_dollars)}</td>
+            <td></td>
+            <td></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  )
+}

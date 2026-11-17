@@ -15,3 +15,10 @@ The five canonical triage roles map to identically named labels (`needs-triage`,
 ### Domain docs
 
 Single-context layout: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### UI Surfaces and Spend badges
+
+Whenever a Feature adds visible UI, the implementing agent must:
+
+1. Declare the UI Surface on the Feature's top-level spec issue with a whole line in the body: `ui-surface: <name>` (lowercase, no spaces, e.g. `ui-surface: spend`). Ask the user to add it if you cannot edit the issue.
+2. Place `<SpendBadge surface="<name>" />` (`frontend/src/spend/SpendBadge.tsx`) on that surface. It shows "Built for $X" linking to the Feature's breakdown, and handles the GitHub-unavailable and unknown-surface states. It must be rendered inside a Router.
