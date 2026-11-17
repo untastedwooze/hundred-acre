@@ -31,5 +31,5 @@ def alembic_config(url: str) -> Config:
     return config
 
 
-def migrate(url: str | None = None, revision: str = "heads") -> None:
+def migrate(url: str | None = None, revision: str = "head") -> None:
     command.upgrade(alembic_config(url or market_database_url()), revision)
