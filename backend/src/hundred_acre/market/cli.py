@@ -2,11 +2,13 @@
 
 import argparse
 import sys
-from datetime import date
+from datetime import date, timedelta
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, text
 
+from hundred_acre.market.adjustments import rebuild_adjustment_factors, sync_corporate_actions
 from hundred_acre.market.db import market_database_url, migrate
+from hundred_acre.market.delistings import sync_delistings
 from hundred_acre.market.jobs import load_daily_bars
 from hundred_acre.market.lake import Lake
 from hundred_acre.market.ratelimit import Priority, RateLimiter, ThrottledSource
@@ -57,6 +59,13 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
         elif args.command == "nightly":
             result = load_daily_bars(source, args.as_of, engine=engine, lake=lake)
             print(f"loaded {result.bars_written} daily bars for {args.as_of}")
+            sync_corporate_actions(source, args.as_of - timedelta(days=7), engine=engine, lake=lake)
+            # Bars changed for these Securities, so refresh their factors even if their actions did not change.
+            with engine.connect() as conn:
+                with_actions = {r[0] for r in conn.execute(text("SELECT DISTINCT security_id FROM corporate_actions_current"))}
+            for security_id in sorted(with_actions & set(result.security_ids.values())):
+                rebuild_adjustment_factors(engine, lake, security_id)
+            sync_delistings(engine, lake)
         else:
             from hundred_acre.market import jobs
 
