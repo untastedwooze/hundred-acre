@@ -6,17 +6,14 @@ from datetime import date, datetime, timezone
 import polars as pl
 from sqlalchemy import Engine
 
+from hundred_acre.market.lake import BAR_SCHEMA as _SCHEMA
 from hundred_acre.market.lake import Lake, write_bars
+from hundred_acre.market.quarantine import quarantine_bars, release_quarantine
 from hundred_acre.market.reference import security_on, sync_reference
 from hundred_acre.market.source import MarketDataSource
 
 SOURCE_NAME = "massive"
 
-_SCHEMA = {
-    "security_id": pl.Int64, "trading_date": pl.Date, "open": pl.Float64, "high": pl.Float64, "low": pl.Float64,
-    "close": pl.Float64, "volume": pl.Float64, "vwap": pl.Float64, "trade_count": pl.Int64, "source": pl.String,
-    "fetched_at": pl.Datetime("us", "UTC"),
-}
 
 
 @dataclass
@@ -24,7 +21,8 @@ class LoadResult:
     trading_date: date
     bars_written: int
     security_ids: dict[str, int] = field(default_factory=dict)  # ticker -> Security id, for the Bars written
-    unmatched_tickers: list[str] = field(default_factory=list)  # Tickers with no Security; their Bars are not written
+    unmatched_tickers: list[str] = field(default_factory=list)  # Tickers with no Security; their Bars are quarantined
+    released_bars: int = 0  # Quarantined Bars (any date) released into the Daily Bars this run
 
 
 def load_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> LoadResult:
@@ -32,11 +30,12 @@ def load_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine, la
     sync_reference(source, engine)
     bars = source.grouped_daily(as_of, adjusted=False, include_otc=False)
     fetched_at = datetime.now(timezone.utc)
-    rows, matched, unmatched = [], {}, []
+    rows, matched, unmatched, quarantined = [], {}, [], []
     for b in bars:
         security_id = security_on(engine, b.ticker, as_of)
         if security_id is None:
             unmatched.append(b.ticker)
+            quarantined.append((b, as_of))
             continue
         matched[b.ticker] = security_id
         rows.append(
@@ -46,4 +45,6 @@ def load_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine, la
             )
         )
     write_bars(lake, pl.DataFrame(rows, schema=_SCHEMA), as_of)
-    return LoadResult(as_of, len(rows), matched, unmatched)
+    quarantine_bars(engine, quarantined, source=SOURCE_NAME, fetched_at=fetched_at)
+    released = release_quarantine(engine, lake)
+    return LoadResult(as_of, len(rows), matched, unmatched, released)

@@ -18,8 +18,9 @@ class SecurityInfo:
     security_id: int
     type: str | None
     name: str | None
-    share_class_figi: str
+    share_class_figi: str | None
     issuer_cik: str | None
+    verified: bool = True
 
 
 def _security_type(code: str | None) -> str | None:
@@ -55,6 +56,7 @@ def sync_reference(source: MarketDataSource, engine: Engine) -> None:
                     text("INSERT INTO issuers (cik, name) VALUES (:c, :n) ON CONFLICT (cik) DO UPDATE SET name = EXCLUDED.name"),
                     {"c": head.cik, "n": head.name},
                 )
+            _attach_to_provisional(conn, figi, [p for rec in recs for p in _periods(rec, events[rec.ticker])])
             security_id = conn.execute(
                 text(
                     "INSERT INTO securities (share_class_figi, name, type, issuer_cik) VALUES (:figi, :name, :type, :cik) "
@@ -70,6 +72,28 @@ def sync_reference(source: MarketDataSource, engine: Engine) -> None:
                         text("INSERT INTO ticker_periods (ticker, security_id, valid_from, valid_to) VALUES (:t, :s, :f, :e)"),
                         {"t": ticker, "s": security_id, "f": start, "e": end},
                     )
+
+
+def _attach_to_provisional(conn, figi: str, periods: list[tuple[str, date | None, date | None]]) -> None:
+    """Give an unverified Provisional Security this FIGI if it held one of the Tickers in an overlapping date range."""
+    if conn.execute(text("SELECT 1 FROM securities WHERE share_class_figi = :f"), {"f": figi}).first():
+        return
+    for ticker, start, end in periods:
+        found = conn.execute(
+            text(
+                "SELECT s.security_id FROM securities s JOIN ticker_periods p USING (security_id) "
+                "WHERE s.share_class_figi IS NULL AND p.ticker = :t "
+                "AND (CAST(:e AS date) IS NULL OR p.valid_from IS NULL OR p.valid_from <= :e) "
+                "AND (CAST(:s AS date) IS NULL OR p.valid_to IS NULL OR p.valid_to >= :s) ORDER BY s.security_id LIMIT 1"
+            ),
+            {"t": ticker, "s": start, "e": end},
+        ).scalar()
+        if found is not None:
+            conn.execute(
+                text("UPDATE securities SET share_class_figi = :f, verified = true WHERE security_id = :i"),
+                {"f": figi, "i": found},
+            )
+            return
 
 
 def security_on(engine: Engine, ticker: str, on: date) -> int | None:
@@ -88,7 +112,7 @@ def security_on(engine: Engine, ticker: str, on: date) -> int | None:
 def security_info(engine: Engine, security_id: int) -> SecurityInfo:
     with engine.connect() as conn:
         row = conn.execute(
-            text("SELECT security_id, type, name, share_class_figi, issuer_cik FROM securities WHERE security_id = :s"),
+            text("SELECT security_id, type, name, share_class_figi, issuer_cik, verified FROM securities WHERE security_id = :s"),
             {"s": security_id},
         ).one()
     return SecurityInfo(*row)
