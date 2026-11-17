@@ -11,6 +11,7 @@ from hundred_acre.market.db import market_database_url, migrate
 from hundred_acre.market.delistings import sync_delistings
 from hundred_acre.market.jobs import load_daily_bars, nightly_intraday_bars
 from hundred_acre.market.lake import Lake
+from hundred_acre.market.statistics import refresh_statistics
 from hundred_acre.market.ratelimit import Priority, RateLimiter, ThrottledSource
 from hundred_acre.market.reference import sync_reference
 from hundred_acre.market.source import MarketDataSource, MarketDataUnavailable
@@ -69,6 +70,7 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
             watchlist_source = source.with_priority(Priority.NIGHTLY_WATCHLIST) if isinstance(source, ThrottledSource) else source
             nightly_intraday_bars(watchlist_source, args.as_of, engine=engine, lake=lake)
             print(f"loaded watchlist intraday bars for {args.as_of}")
+            refresh_statistics(lake)  # incremental: only Securities whose Bars or factors changed
         else:
             from hundred_acre.market import jobs
 
