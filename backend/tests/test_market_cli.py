@@ -25,6 +25,25 @@ def test_nightly_command_loads_bars_for_as_of(market_engine, lake):
     assert read_bars(lake, [sid], DAY, DAY).height == 1
 
 
+def test_nightly_syncs_corporate_actions_and_delistings_after_loading_bars(market_engine, lake):
+    from hundred_acre.market.adjustments import corporate_action_history
+    from hundred_acre.market.delistings import delisting
+    from hundred_acre.market.source import Split
+
+    s = src()
+    s.tickers_.append(TickerRecord("OLD", "Old Co", "CS", "stocks", "BBG000OLD", active=False, delisted_date=DAY))
+    s.grouped_daily_bars[DAY].append(BarData("OLD", 5.0, 5.0, 5.0, 5.0, 10.0, 5.0, 1))
+    s.split_list = [Split("AAPL", DAY, 1, 2, id="s1")]
+    main(["reference-sync", "--as-of", "2026-11-13"], source=s, engine=market_engine, lake=lake)
+
+    assert main(["nightly", "--as-of", "2026-11-13"], source=s, engine=market_engine, lake=lake) == 0
+
+    with market_engine.connect() as c:
+        ids = dict(c.execute(text("SELECT ticker, security_id FROM ticker_periods")).all())
+    assert [a.kind for a in corporate_action_history(market_engine, ids["AAPL"])] == ["split"]
+    assert delisting(market_engine, ids["OLD"]).cash_per_share == 5.0
+
+
 def test_reference_sync_command_creates_securities(market_engine, lake):
     assert main(["reference-sync", "--as-of", "2026-11-13"], source=src(), engine=market_engine, lake=lake) == 0
     with market_engine.connect() as c:
