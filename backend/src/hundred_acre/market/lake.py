@@ -15,6 +15,12 @@ BAR_COLUMNS = (
     "security_id", "trading_date", "open", "high", "low", "close", "volume", "vwap", "trade_count", "source", "fetched_at",
 )
 
+BAR_SCHEMA = {
+    "security_id": pl.Int64, "trading_date": pl.Date, "open": pl.Float64, "high": pl.Float64, "low": pl.Float64,
+    "close": pl.Float64, "volume": pl.Float64, "vwap": pl.Float64, "trade_count": pl.Int64, "source": pl.String,
+    "fetched_at": pl.Datetime("us", "UTC"),
+}
+
 _CREATE_BARS = """
 CREATE TABLE IF NOT EXISTS lake.daily_bars (
     security_id BIGINT, trading_date DATE,
@@ -80,6 +86,19 @@ def replace_bars(lake: Lake, bars: pl.DataFrame, security_ids: Sequence[int], da
         con.execute(
             "DELETE FROM lake.daily_bars WHERE list_contains(?, security_id) AND list_contains(?, trading_date)",
             [list(security_ids), list(days)],
+        )
+        con.execute("INSERT INTO lake.daily_bars SELECT * FROM incoming")
+        con.execute("COMMIT")
+
+
+def add_bars(lake: Lake, bars: pl.DataFrame, trading_date: date) -> None:
+    """Add Bars to `trading_date`, replacing only those of the same Securities and leaving other Bars untouched."""
+    with lake.connect() as con:
+        con.register("incoming", bars.select(BAR_COLUMNS).to_arrow())
+        con.execute("BEGIN")
+        con.execute(
+            "DELETE FROM lake.daily_bars WHERE trading_date = ? AND security_id IN (SELECT security_id FROM incoming)",
+            [trading_date],
         )
         con.execute("INSERT INTO lake.daily_bars SELECT * FROM incoming")
         con.execute("COMMIT")
