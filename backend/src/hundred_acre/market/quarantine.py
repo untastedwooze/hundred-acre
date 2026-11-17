@@ -11,6 +11,7 @@ from datetime import date, datetime
 import polars as pl
 from sqlalchemy import Engine, text
 
+from hundred_acre.market.coverage import record_coverage
 from hundred_acre.market.lake import BAR_SCHEMA, Lake, add_bars
 from hundred_acre.market.reference import security_on
 from hundred_acre.market.source import BarData
@@ -102,6 +103,7 @@ def release_quarantine(engine: Engine, lake: Lake) -> int:
     _create_provisional_securities(engine)
     by_date: dict[date, list[dict]] = {}
     released: list[tuple[str, date]] = []
+    covered: list[tuple[int, date, datetime]] = []
     for q in list_quarantined_bars(engine):
         security_id = security_on(engine, q.ticker, q.trading_date)
         if security_id is None:
@@ -112,9 +114,12 @@ def release_quarantine(engine: Engine, lake: Lake) -> int:
                  fetched_at=q.fetched_at)
         )
         released.append((q.ticker, q.trading_date))
+        covered.append((security_id, q.trading_date, q.fetched_at))
     for day, rows in by_date.items():
         add_bars(lake, pl.DataFrame(rows, schema=BAR_SCHEMA), day)
     with engine.begin() as conn:
+        for security_id, day, fetched_at in covered:  # released Bars are fetched data, so they get Coverage too
+            record_coverage(conn, security_id, "1d", [day], status="complete", fetched_at=fetched_at, bar_counts={day: 1})
         for ticker, day in released:
             conn.execute(text("DELETE FROM quarantined_bars WHERE ticker = :t AND trading_date = :d"), {"t": ticker, "d": day})
     return len(released)

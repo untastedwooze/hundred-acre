@@ -78,6 +78,19 @@ def write_bars(lake: Lake, bars: pl.DataFrame, trading_date: date) -> None:
         con.execute("COMMIT")
 
 
+def replace_bars(lake: Lake, bars: pl.DataFrame, security_ids: Sequence[int], days: Sequence[date]) -> None:
+    """Replace `security_ids`' Daily Bars on `days` with `bars` in one transaction."""
+    with lake.connect() as con:
+        con.register("incoming", bars.select(BAR_COLUMNS).to_arrow())
+        con.execute("BEGIN")
+        con.execute(
+            "DELETE FROM lake.daily_bars WHERE list_contains(?, security_id) AND list_contains(?, trading_date)",
+            [list(security_ids), list(days)],
+        )
+        con.execute("INSERT INTO lake.daily_bars SELECT * FROM incoming")
+        con.execute("COMMIT")
+
+
 def add_bars(lake: Lake, bars: pl.DataFrame, trading_date: date) -> None:
     """Add Bars to `trading_date`, replacing only those of the same Securities and leaving other Bars untouched."""
     with lake.connect() as con:
@@ -91,25 +104,54 @@ def add_bars(lake: Lake, bars: pl.DataFrame, trading_date: date) -> None:
         con.execute("COMMIT")
 
 
+DEFAULT_SNAPSHOT_RETENTION_DAYS = 90
+
+
+def snapshot_retention_days() -> int:
+    """How long DuckLake snapshots (previous versions of re-fetched Bars) stay readable; MARKET_SNAPSHOT_RETENTION_DAYS."""
+    return int(os.environ.get("MARKET_SNAPSHOT_RETENTION_DAYS", DEFAULT_SNAPSHOT_RETENTION_DAYS))
+
+
+def current_snapshot(lake: Lake) -> int:
+    """Id of the latest DuckLake snapshot; pass it to `read_bars(snapshot=...)` later to see Bars as they are now."""
+    with lake.connect() as con:
+        return con.execute("SELECT id FROM lake.current_snapshot()").fetchone()[0]
+
+
+def expire_snapshots(lake: Lake, retention_days: int | None = None) -> list[int]:
+    """Expire snapshots older than `retention_days` (default: configured retention); returns the expired ids."""
+    days = snapshot_retention_days() if retention_days is None else retention_days
+    with lake.connect() as con:
+        before = {r[0] for r in con.execute("SELECT snapshot_id FROM lake.snapshots()").fetchall()}
+        con.execute(
+            "CALL ducklake_expire_snapshots('lake', older_than => now() - to_days(?))", [days]
+        )
+        after = {r[0] for r in con.execute("SELECT snapshot_id FROM lake.snapshots()").fetchall()}
+    return sorted(before - after)
+
+
 def read_bars(
     lake: Lake,
     security_ids: Sequence[int],
     start: date,
     end: date,
     columns: Sequence[str] | None = None,
+    snapshot: int | None = None,
 ) -> pl.DataFrame:
     """Unadjusted Daily Bars for `security_ids` with `start <= trading_date <= end`, as a Polars DataFrame.
 
-    `columns` limits the columns returned (default: all), in the order asked.
+    `columns` limits the columns returned (default: all), in the order asked. `snapshot` reads the Bars as they were
+    at that DuckLake snapshot (see `current_snapshot`), e.g. before a late correction replaced them.
     """
     wanted = list(columns) if columns is not None else list(BAR_COLUMNS)
     unknown = set(wanted) - set(BAR_COLUMNS)
     if unknown:
         raise ValueError(f"unknown Bar columns: {sorted(unknown)}")
     select = ", ".join(wanted)
+    at = f" AT (VERSION => {int(snapshot)})" if snapshot is not None else ""
     with lake.connect() as con:
         return con.sql(
-            f"SELECT {select} FROM lake.daily_bars WHERE list_contains(?, security_id) AND trading_date BETWEEN ? AND ? "
+            f"SELECT {select} FROM lake.daily_bars{at} WHERE list_contains(?, security_id) AND trading_date BETWEEN ? AND ? "
             "ORDER BY security_id, trading_date",
             params=[list(security_ids), start, end],
         ).pl()
