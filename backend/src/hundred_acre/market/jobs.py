@@ -1,27 +1,33 @@
 """Nightly market-data jobs."""
 
+import logging
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
 import polars as pl
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine
 
-from hundred_acre.market.coverage import days_to_fetch, record_coverage
+from hundred_acre.market.coverage import days_to_fetch, mark_suspect, record_coverage
 from hundred_acre.market.lake import BAR_SCHEMA as _SCHEMA
 from hundred_acre.market.lake import (
-    INTRADAY_SCHEMA, Lake, expire_snapshots, read_bars, read_intraday_bars, replace_bars, replace_intraday_bars,
-    write_bars,
+    INTRADAY_SCHEMA, Lake, bar_row, expire_snapshots, read_bars, read_intraday_bars, replace_bars,
+    replace_intraday_bars, write_bars,
 )
-from hundred_acre.market.sessions import assign_sessions
 from hundred_acre.market.quarantine import quarantine_bars, release_quarantine
-from hundred_acre.market.reference import security_on, sync_reference
+from hundred_acre.market.reference import list_ticker_periods, security_on, securities_expected_to_trade, sync_reference
+from hundred_acre.market.sessions import assign_sessions
 from hundred_acre.market.source import MarketDataSource, MarketDataUnavailable
-from hundred_acre.market.trading_calendar import generate_calendar, read_trading_calendar
+from hundred_acre.market.statistics import refresh_statistics
+from hundred_acre.market.trading_calendar import (
+    CalendarDisagreement, generate_calendar, previous_trading_day, read_trading_calendar,
+)
+from hundred_acre.market.watchlist import non_watchlist_security_ids, watchlist
 
 SOURCE_NAME = "massive"
 INTRADAY_INTERVAL = "5m"
-
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -31,13 +37,41 @@ class LoadResult:
     security_ids: dict[str, int] = field(default_factory=dict)  # ticker -> Security id, for the Bars written
     unmatched_tickers: list[str] = field(default_factory=list)  # Tickers with no Security; their Bars are quarantined
     released_bars: int = 0  # Quarantined Bars (any date) released into the Daily Bars this run
+    calendar_disagreements: list[CalendarDisagreement] = field(default_factory=list)  # Trading Calendar vs Massive
+
+
+def refresh_calendar(source: MarketDataSource, engine: Engine, start: date, end: date) -> list[CalendarDisagreement]:
+    """Generate the Trading Calendar for [start, end] and cross-check it against Massive's upcoming holidays.
+
+    Disagreements are logged as warnings and returned. An unreachable source skips the cross-check only.
+    """
+    try:
+        found = generate_calendar(engine, start, end, source=source)
+    except MarketDataUnavailable as exc:
+        log.warning("trading calendar cross-check skipped: %s", exc)
+        return []
+    for d in found:
+        log.warning("trading calendar disagrees with Massive on %s: Massive says %s, ours says %s", d.date, d.massive_status, d.ours)
+    return found
 
 
 def load_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> LoadResult:
-    """Sync reference data, then load `as_of`'s Unadjusted grouped-daily Bars (OTC excluded) into the lake."""
+    """Sync reference data, then load `as_of`'s Unadjusted grouped-daily Bars (OTC excluded) into the lake.
+
+    Coverage is recorded for Securities expected to trade that day (exchange-listed, Ticker period covering it); an
+    over-the-counter or not-yet-listed Security gets none unless it traded. If the source is unreachable those
+    Securities get failed Coverage and the error propagates.
+    """
     sync_reference(source, engine)
-    bars = source.grouped_daily(as_of, adjusted=False, include_otc=False)
+    expected = set(securities_expected_to_trade(engine, as_of))
     fetched_at = datetime.now(timezone.utc)
+    try:
+        bars = source.grouped_daily(as_of, adjusted=False, include_otc=False)
+    except MarketDataUnavailable:
+        with engine.begin() as conn:
+            for security_id in expected:
+                record_coverage(conn, security_id, "1d", [as_of], status="failed", fetched_at=fetched_at)
+        raise
     rows, matched, unmatched, quarantined = [], {}, [], []
     for b in bars:
         security_id = security_on(engine, b.ticker, as_of)
@@ -46,20 +80,14 @@ def load_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine, la
             quarantined.append((b, as_of))
             continue
         matched[b.ticker] = security_id
-        rows.append(
-            dict(
-                security_id=security_id, trading_date=as_of, open=b.open, high=b.high, low=b.low, close=b.close,
-                volume=b.volume, vwap=b.vwap, trade_count=b.trade_count, source=SOURCE_NAME, fetched_at=fetched_at,
-            )
-        )
+        rows.append(bar_row(security_id, as_of, b, source=SOURCE_NAME, fetched_at=fetched_at))
     write_bars(lake, pl.DataFrame(rows, schema=_SCHEMA), as_of)
+    answered = set(matched.values())
     with engine.begin() as conn:  # Bars first, then Coverage, so Coverage never claims Bars that were not written
-        universe = set(conn.execute(text("SELECT security_id FROM securities")).scalars())
-        for security_id in universe:
-            answered = security_id in matched.values()
+        for security_id in expected | answered:
             record_coverage(
-                conn, security_id, "1d", [as_of], status="complete" if answered else "empty", fetched_at=fetched_at,
-                bar_counts={as_of: 1} if answered else None,
+                conn, security_id, "1d", [as_of], status="complete" if security_id in answered else "empty",
+                fetched_at=fetched_at, bar_counts={as_of: 1} if security_id in answered else None,
             )
     quarantine_bars(engine, quarantined, source=SOURCE_NAME, fetched_at=fetched_at)
     released = release_quarantine(engine, lake)
@@ -73,6 +101,46 @@ def _years_back(day: date, years: int) -> date:
         return day.replace(year=day.year - years, day=28) + timedelta(days=1)
 
 
+def _backfill(
+    engine: Engine, lake: Lake, interval: str, start: date, as_of: date, periods: list[tuple], *,
+    fetch: Callable[[str, list[date]], list],
+    build: Callable[[int, list[date], list, datetime], tuple[pl.DataFrame, dict[date, int]]],
+    replace: Callable[[Lake, pl.DataFrame, list[int], list[date]], None],
+) -> None:
+    """Shared skeleton of the per-Ticker backfills.
+
+    Per Ticker period, fetches only Trading Calendar days minus complete or empty Coverage (within the period's dates),
+    then writes the Bars and Coverage together so an interrupted run resumes without refetching finished days. A Ticker
+    the source cannot answer for is marked failed and retried next run. `build` turns the fetched data into the Bars
+    frame and a per-day Bar count; days without Bars are recorded empty.
+    """
+    for ticker, security_id, valid_from, valid_to in periods:  # each Ticker is fetched only for the days it was in use
+        missing = [
+            d
+            for d in days_to_fetch(engine, security_id, interval, start, as_of)
+            if (valid_from is None or d >= valid_from) and (valid_to is None or d <= valid_to)
+        ]
+        if not missing:
+            continue
+        fetched_at = datetime.now(timezone.utc)
+        try:
+            fetched = fetch(ticker, missing)
+        except MarketDataUnavailable:
+            with engine.begin() as conn:
+                record_coverage(conn, security_id, interval, missing, status="failed", fetched_at=fetched_at)
+            continue
+        frame, counts = build(security_id, missing, fetched, fetched_at)
+        replace(lake, frame, [security_id], missing)
+        with engine.begin() as conn:
+            record_coverage(
+                conn, security_id, interval, [d for d in missing if d in counts], status="complete",
+                fetched_at=fetched_at, bar_counts=counts,
+            )
+            record_coverage(
+                conn, security_id, interval, [d for d in missing if d not in counts], status="empty", fetched_at=fetched_at
+            )
+
+
 def backfill_daily_bars(
     source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake, years: int = 2, since: date | None = None
 ) -> None:
@@ -83,66 +151,36 @@ def backfill_daily_bars(
     source cannot answer for is marked failed and retried on the next run.
     """
     start = since or _years_back(as_of, years)
-    generate_calendar(engine, start, as_of)
+    refresh_calendar(source, engine, start, date(as_of.year + 1, 12, 31))
     sync_reference(source, engine)
-    with engine.connect() as conn:
-        periods = conn.execute(
-            text("SELECT ticker, security_id, valid_from, valid_to FROM ticker_periods ORDER BY ticker, valid_from")
-        ).all()
-    for ticker, security_id, valid_from, valid_to in periods:  # each Ticker is fetched only for the days it was in use
-        missing = [
-            d
-            for d in days_to_fetch(engine, security_id, "1d", start, as_of)
-            if (valid_from is None or d >= valid_from) and (valid_to is None or d <= valid_to)
-        ]
-        if not missing:
-            continue
-        fetched_at = datetime.now(timezone.utc)
-        try:
-            fetched = source.aggregates(ticker, missing[0], missing[-1], adjusted=False)
-        except MarketDataUnavailable:
-            with engine.begin() as conn:
-                record_coverage(conn, security_id, "1d", missing, status="failed", fetched_at=fetched_at)
-            continue
+
+    def build(security_id, missing, fetched, fetched_at):
         by_day = {d: b for d, b in fetched if d in set(missing)}
-        rows = [
-            dict(
-                security_id=security_id, trading_date=d, open=b.open, high=b.high, low=b.low, close=b.close,
-                volume=b.volume, vwap=b.vwap, trade_count=b.trade_count, source=SOURCE_NAME, fetched_at=fetched_at,
-            )
-            for d, b in sorted(by_day.items())
-        ]
-        replace_bars(lake, pl.DataFrame(rows, schema=_SCHEMA), [security_id], missing)
-        with engine.begin() as conn:
-            record_coverage(
-                conn, security_id, "1d", [d for d in missing if d in by_day], status="complete", fetched_at=fetched_at,
-                bar_counts={d: 1 for d in by_day},
-            )
-            record_coverage(conn, security_id, "1d", [d for d in missing if d not in by_day], status="empty", fetched_at=fetched_at)
+        rows = [bar_row(security_id, d, b, source=SOURCE_NAME, fetched_at=fetched_at) for d, b in sorted(by_day.items())]
+        return pl.DataFrame(rows, schema=_SCHEMA), {d: 1 for d in by_day}
+
+    _backfill(
+        engine, lake, "1d", start, as_of, list_ticker_periods(engine),
+        fetch=lambda ticker, missing: source.aggregates(ticker, missing[0], missing[-1], adjusted=False),
+        build=build, replace=replace_bars,
+    )
 
 
 def nightly_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> LoadResult:
     """Load `as_of`'s Daily Bars and re-fetch the previous trading day's to catch late corrections, then expire old snapshots.
 
     Each day's Bars are replaced in one DuckLake transaction, so the pre-correction version stays readable by snapshot
-    until it expires (retention: `snapshot_retention_days`).
+    until it expires (retention: `snapshot_retention_days`). The Trading Calendar is regenerated through next year and
+    cross-checked against Massive; disagreements come back on the result.
     """
-    generate_calendar(engine, as_of - timedelta(days=14), as_of)
-    with engine.connect() as conn:
-        previous = conn.execute(
-            text("SELECT max(trading_date) FROM trading_calendar WHERE calendar_id = 'XNYS' AND trading_date < :d"),
-            {"d": as_of},
-        ).scalar_one()
+    disagreements = refresh_calendar(source, engine, as_of - timedelta(days=14), date(as_of.year + 1, 12, 31))
+    previous = previous_trading_day(engine, as_of)
     if previous is not None:
         load_daily_bars(source, previous, engine=engine, lake=lake)
     result = load_daily_bars(source, as_of, engine=engine, lake=lake)
+    result.calendar_disagreements = disagreements
     expire_snapshots(lake)
     return result
-
-
-def watchlist_security_ids(engine: Engine) -> list[int]:
-    with engine.connect() as conn:
-        return list(conn.execute(text("SELECT security_id FROM watchlist ORDER BY security_id")).scalars())
 
 
 def backfill_intraday_bars(
@@ -158,67 +196,36 @@ def backfill_intraday_bars(
     start = since or _years_back(as_of, years)
     generate_calendar(engine, start - timedelta(days=7), as_of + timedelta(days=10))
     calendar = read_trading_calendar(engine, start - timedelta(days=7), as_of + timedelta(days=10))
-    ids = watchlist_security_ids(engine) if security_ids is None else security_ids
+    ids = watchlist(engine) if security_ids is None else security_ids
     if not ids:
         return
-    with engine.connect() as conn:
-        periods = conn.execute(
-            text(
-                "SELECT ticker, security_id, valid_from, valid_to FROM ticker_periods "
-                "WHERE security_id = ANY(:ids) ORDER BY security_id, valid_from"
-            ),
-            {"ids": ids},
-        ).all()
-    for ticker, security_id, valid_from, valid_to in periods:
-        missing = [
-            d
-            for d in days_to_fetch(engine, security_id, INTRADAY_INTERVAL, start, as_of)
-            if (valid_from is None or d >= valid_from) and (valid_to is None or d <= valid_to)
-        ]
-        if not missing:
-            continue
-        fetched_at = datetime.now(timezone.utc)
-        try:  # overnight Bars lead into a trading day from the evening before, up to a long weekend earlier
-            fetched = source.intraday_aggregates(ticker, missing[0] - timedelta(days=4), missing[-1], adjusted=False)
-        except MarketDataUnavailable:
-            with engine.begin() as conn:
-                record_coverage(conn, security_id, INTRADAY_INTERVAL, missing, status="failed", fetched_at=fetched_at)
-            continue
+
+    def fetch(ticker, missing):  # overnight Bars lead into a trading day from the evening before, up to a long weekend earlier
+        return source.intraday_aggregates(ticker, missing[0] - timedelta(days=4), missing[-1], adjusted=False)
+
+    def build(security_id, missing, fetched, fetched_at):
         wanted = set(missing)
         tagged = assign_sessions([t for t, _ in fetched], calendar)
         rows = [
-            dict(
-                security_id=security_id, trading_date=tag[0], bar_start=t, trading_session=tag[1], open=b.open,
-                high=b.high, low=b.low, close=b.close, volume=b.volume, vwap=b.vwap, trade_count=b.trade_count,
-                source=SOURCE_NAME, fetched_at=fetched_at,
-            )
+            bar_row(security_id, tag[0], b, source=SOURCE_NAME, fetched_at=fetched_at, bar_start=t, trading_session=tag[1])
             for (t, b), tag in zip(fetched, tagged)
             if tag is not None and tag[0] in wanted
         ]
         counts: dict[date, int] = {}
         for r in rows:
             counts[r["trading_date"]] = counts.get(r["trading_date"], 0) + 1
-        replace_intraday_bars(lake, pl.DataFrame(rows, schema=INTRADAY_SCHEMA), [security_id], missing)
-        with engine.begin() as conn:
-            record_coverage(
-                conn, security_id, INTRADAY_INTERVAL, [d for d in missing if d in counts], status="complete",
-                fetched_at=fetched_at, bar_counts=counts,
-            )
-            record_coverage(
-                conn, security_id, INTRADAY_INTERVAL, [d for d in missing if d not in counts], status="empty",
-                fetched_at=fetched_at,
-            )
+        return pl.DataFrame(rows, schema=INTRADAY_SCHEMA), counts
+
+    _backfill(
+        engine, lake, INTRADAY_INTERVAL, start, as_of, list_ticker_periods(engine, ids),
+        fetch=fetch, build=build, replace=replace_intraday_bars,
+    )
 
 
 def run_backfill(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> None:
     """The `backfill` command: two years of Daily Bars for the Universe, then of Intraday Bars for the Watchlist."""
     backfill_daily_bars(source, as_of, engine=engine, lake=lake)
     backfill_intraday_bars(source, as_of, engine=engine, lake=lake)
-
-
-def nightly_intraday_bars(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> None:
-    """Load the Watchlist's Intraday Bars for `as_of`, plus any day of the past week still missing (e.g. after a failure)."""
-    backfill_intraday_bars(source, as_of, engine=engine, lake=lake, since=as_of - timedelta(days=7))
 
 
 DEFAULT_VOLUME_MISMATCH_THRESHOLD = 0.05
@@ -253,33 +260,35 @@ def mark_suspect_days(
     now = datetime.now(timezone.utc)
     with engine.begin() as conn:
         for security_id, day in suspect:
-            conn.execute(
-                text(
-                    "UPDATE coverage SET status = 'suspect', fetched_at = :f WHERE security_id = :s AND interval = :i "
-                    "AND trading_date = :d AND status = 'complete'"
-                ),
-                {"f": now, "s": security_id, "i": INTRADAY_INTERVAL, "d": day},
-            )
+            mark_suspect(conn, security_id, INTRADAY_INTERVAL, day, fetched_at=now)
     return suspect
+
+
+def _resolve_suspect_days(
+    source: MarketDataSource, as_of: date, since: date, ids: list[int], *, engine: Engine, lake: Lake
+) -> None:
+    """Mark suspect days against Daily Bars and re-fetch each; a mismatch the re-fetch did not resolve stays suspect."""
+    if mark_suspect_days(engine, lake, ids, since, as_of):
+        # Suspect days are not complete, so the same backfill now fetches exactly those days and replaces them atomically.
+        backfill_intraday_bars(source, as_of, engine=engine, lake=lake, since=since, security_ids=ids)
+        mark_suspect_days(engine, lake, ids, since, as_of)
+
+
+def nightly_intraday_bars(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> None:
+    """Load the Watchlist's Intraday Bars for `as_of`, plus any day of the past week still missing (e.g. after a failure),
+    then mark suspect any day whose volume disagrees with its Daily Bar and re-fetch it."""
+    since = as_of - timedelta(days=7)
+    backfill_intraday_bars(source, as_of, engine=engine, lake=lake, since=since)
+    _resolve_suspect_days(source, as_of, since, watchlist(engine), engine=engine, lake=lake)
 
 
 def run_weekly(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> None:
     """The `weekly` job: a week of Intraday Bars for every non-Watchlist Security (one call each, warrants, units and
-    rights skipped), then suspect detection against Daily Bars with a re-fetch of each suspect day."""
+    rights skipped), then suspect detection against Daily Bars with a re-fetch of each suspect day, then a refresh of
+    the Daily Security Statistics the new Bars invalidated."""
     since = as_of - timedelta(days=7)
     sync_reference(source, engine)
-    with engine.connect() as conn:
-        ids = list(
-            conn.execute(
-                text(
-                    "SELECT security_id FROM securities WHERE security_id NOT IN (SELECT security_id FROM watchlist) "
-                    "AND (type IS NULL OR type <> ALL(:skipped)) ORDER BY security_id"
-                ),
-                {"skipped": list(WEEKLY_SKIPPED_TYPES)},
-            ).scalars()
-        )
+    ids = non_watchlist_security_ids(engine, skipped_types=WEEKLY_SKIPPED_TYPES)
     backfill_intraday_bars(source, as_of, engine=engine, lake=lake, since=since, security_ids=ids)
-    if mark_suspect_days(engine, lake, ids, since, as_of):
-        # Suspect days are not complete, so the same backfill now fetches exactly those days and replaces them atomically.
-        backfill_intraday_bars(source, as_of, engine=engine, lake=lake, since=since, security_ids=ids)
-        mark_suspect_days(engine, lake, ids, since, as_of)  # a mismatch the re-fetch did not resolve stays suspect
+    _resolve_suspect_days(source, as_of, since, ids, engine=engine, lake=lake)
+    refresh_statistics(lake)

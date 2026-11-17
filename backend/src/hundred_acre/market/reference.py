@@ -59,11 +59,13 @@ def sync_reference(source: MarketDataSource, engine: Engine) -> None:
             _attach_to_provisional(conn, figi, [p for rec in recs for p in _periods(rec, events[rec.ticker])])
             security_id = conn.execute(
                 text(
-                    "INSERT INTO securities (share_class_figi, name, type, issuer_cik) VALUES (:figi, :name, :type, :cik) "
+                    "INSERT INTO securities (share_class_figi, name, type, issuer_cik, market) "
+                    "VALUES (:figi, :name, :type, :cik, :market) "
                     "ON CONFLICT (share_class_figi) DO UPDATE SET name = EXCLUDED.name, type = EXCLUDED.type, "
-                    "issuer_cik = EXCLUDED.issuer_cik RETURNING security_id"
+                    "issuer_cik = EXCLUDED.issuer_cik, market = EXCLUDED.market RETURNING security_id"
                 ),
-                {"figi": figi, "name": head.name, "type": _security_type(head.type), "cik": head.cik},
+                {"figi": figi, "name": head.name, "type": _security_type(head.type), "cik": head.cik,
+                 "market": head.market},
             ).scalar_one()
             conn.execute(text("DELETE FROM ticker_periods WHERE security_id = :s"), {"s": security_id})
             for rec in recs:
@@ -116,3 +118,32 @@ def security_info(engine: Engine, security_id: int) -> SecurityInfo:
             {"s": security_id},
         ).one()
     return SecurityInfo(*row)
+
+
+def list_ticker_periods(engine: Engine, security_ids: list[int] | None = None) -> list[tuple[str, int, date | None, date | None]]:
+    """(ticker, security_id, valid_from, valid_to) for `security_ids` (default: every Security), by Security then start."""
+    query = "SELECT ticker, security_id, valid_from, valid_to FROM ticker_periods "
+    if security_ids is None:
+        query += "ORDER BY ticker, valid_from"
+        params: dict = {}
+    else:
+        query += "WHERE security_id = ANY(:ids) ORDER BY security_id, valid_from"
+        params = {"ids": security_ids}
+    with engine.connect() as conn:
+        return [tuple(r) for r in conn.execute(text(query), params).all()]
+
+
+def securities_expected_to_trade(engine: Engine, on: date) -> list[int]:
+    """Exchange-listed Securities (not over-the-counter) with a Ticker period covering `on`."""
+    with engine.connect() as conn:
+        return list(
+            conn.execute(
+                text(
+                    "SELECT s.security_id FROM securities s WHERE s.market IS DISTINCT FROM 'otc' AND EXISTS ("
+                    "SELECT 1 FROM ticker_periods p WHERE p.security_id = s.security_id "
+                    "AND (p.valid_from IS NULL OR p.valid_from <= :d) AND (p.valid_to IS NULL OR p.valid_to >= :d)) "
+                    "ORDER BY s.security_id"
+                ),
+                {"d": on},
+            ).scalars()
+        )

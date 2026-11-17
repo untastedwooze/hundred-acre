@@ -102,3 +102,21 @@ def read_trading_calendar(engine: Engine, start: date, end: date, *, calendar_id
         "half_day": pl.Boolean,
     }
     return pl.DataFrame([tuple(r) for r in rows], schema=schema, orient="row")
+
+
+def previous_trading_day(engine: Engine, before: date, *, calendar_id: str = NYSE) -> date | None:
+    """The latest Trading Calendar day strictly before `before`, or None if the calendar has none."""
+    with engine.connect() as conn:
+        return conn.execute(
+            text("SELECT max(trading_date) FROM trading_calendar WHERE calendar_id = :c AND trading_date < :d"),
+            {"c": calendar_id, "d": before},
+        ).scalar_one()
+
+
+def count_trading_days(engine: Engine, start: date, end: date, *, calendar_id: str = NYSE) -> int:
+    """Trading Calendar days in [start, end]."""
+    with engine.connect() as conn:
+        return conn.execute(
+            text("SELECT count(*) FROM trading_calendar WHERE calendar_id = :c AND trading_date BETWEEN :s AND :e"),
+            {"c": calendar_id, "s": start, "e": end},
+        ).scalar_one()

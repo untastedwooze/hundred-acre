@@ -88,3 +88,14 @@ def coverage_summary(
         ).all()
     cols = ["security_id", "complete", "empty", "failed", "partial", "suspect", "never_fetched"]
     return pl.DataFrame([tuple(r) for r in rows], schema={c: pl.Int64 for c in cols}, orient="row")
+
+
+def mark_suspect(conn: Connection, security_id: int, interval: str, day: date, *, fetched_at: datetime) -> None:
+    """Flag a complete day suspect (queued for re-fetch); days in any other status are left alone."""
+    conn.execute(
+        text(
+            "UPDATE coverage SET status = 'suspect', fetched_at = :f WHERE security_id = :s AND interval = :i "
+            "AND trading_date = :d AND status = 'complete'"
+        ),
+        {"f": fetched_at, "s": security_id, "i": interval, "d": day},
+    )

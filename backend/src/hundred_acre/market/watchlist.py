@@ -4,7 +4,6 @@ from datetime import date
 
 from sqlalchemy import Engine, text
 
-from hundred_acre.market.jobs import backfill_intraday_bars, watchlist_security_ids
 from hundred_acre.market.lake import Lake
 from hundred_acre.market.ratelimit import Priority, ThrottledSource
 from hundred_acre.market.reference import _periods, _security_type, security_on, sync_reference
@@ -25,6 +24,8 @@ def add_to_watchlist(source: MarketDataSource, engine: Engine, lake: Lake, ticke
         conn.execute(
             text("INSERT INTO watchlist (security_id) VALUES (:s) ON CONFLICT DO NOTHING"), {"s": security_id}
         )
+    from hundred_acre.market.jobs import backfill_intraday_bars  # jobs imports this module
+
     backfill = source.with_priority(Priority.BACKFILL) if isinstance(source, ThrottledSource) else source
     backfill_intraday_bars(backfill, as_of, engine=engine, lake=lake, security_ids=[security_id])
     return security_id
@@ -38,7 +39,22 @@ def remove_from_watchlist(engine: Engine, security_id: int) -> None:
 
 def watchlist(engine: Engine) -> list[int]:
     """Security ids on the Watchlist."""
-    return watchlist_security_ids(engine)
+    with engine.connect() as conn:
+        return list(conn.execute(text("SELECT security_id FROM watchlist ORDER BY security_id")).scalars())
+
+
+def non_watchlist_security_ids(engine: Engine, *, skipped_types: tuple[str, ...] = ()) -> list[int]:
+    """Securities off the Watchlist whose type is not in `skipped_types` (an unknown type is kept)."""
+    with engine.connect() as conn:
+        return list(
+            conn.execute(
+                text(
+                    "SELECT security_id FROM securities WHERE security_id NOT IN (SELECT security_id FROM watchlist) "
+                    "AND (type IS NULL OR type <> ALL(:skipped)) ORDER BY security_id"
+                ),
+                {"skipped": list(skipped_types)},
+            ).scalars()
+        )
 
 
 def _create_security(source: MarketDataSource, engine: Engine, ticker: str) -> int:
@@ -60,11 +76,11 @@ def _create_security(source: MarketDataSource, engine: Engine, ticker: str) -> i
         if security_id is None:  # no FIGI: unverified until one is attached, like a Provisional Security
             security_id = conn.execute(
                 text(
-                    "INSERT INTO securities (share_class_figi, name, type, issuer_cik, verified) "
-                    "VALUES (:f, :n, :t, :c, :v) RETURNING security_id"
+                    "INSERT INTO securities (share_class_figi, name, type, issuer_cik, verified, market) "
+                    "VALUES (:f, :n, :t, :c, :v, :m) RETURNING security_id"
                 ),
                 {"f": rec.share_class_figi, "n": rec.name, "t": _security_type(rec.type), "c": rec.cik,
-                 "v": rec.share_class_figi is not None},
+                 "v": rec.share_class_figi is not None, "m": rec.market},
             ).scalar_one()
         conn.execute(text("DELETE FROM ticker_periods WHERE security_id = :s"), {"s": security_id})
         for t, start, end in _periods(rec, source.ticker_events(rec.ticker)):

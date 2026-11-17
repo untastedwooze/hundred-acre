@@ -12,11 +12,12 @@ import polars as pl
 from sqlalchemy import Engine, text
 
 from hundred_acre.market.coverage import record_coverage
-from hundred_acre.market.lake import BAR_SCHEMA, Lake, add_bars
+from hundred_acre.market.lake import BAR_SCHEMA, Lake, add_bars, bar_row
 from hundred_acre.market.reference import security_on
 from hundred_acre.market.source import BarData
+from hundred_acre.market.trading_calendar import count_trading_days, generate_calendar
 
-# Counted as distinct trading dates on which the Ticker's Bars were quarantined (no Trading Calendar needed).
+# Counted as Trading Calendar days from the Ticker's first quarantined Bar to its latest, inclusive.
 PROVISIONAL_AFTER_TRADING_DAYS = 5
 
 
@@ -80,11 +81,19 @@ def list_provisional_securities(engine: Engine) -> list[ProvisionalSecurity]:
 
 
 def _create_provisional_securities(engine: Engine) -> None:
-    with engine.begin() as conn:
-        aged = conn.execute(
-            text("SELECT ticker, min(trading_date) FROM quarantined_bars GROUP BY ticker HAVING count(*) >= :n"),
-            {"n": PROVISIONAL_AFTER_TRADING_DAYS},
+    with engine.connect() as conn:
+        spans = conn.execute(
+            text("SELECT ticker, min(trading_date), max(trading_date) FROM quarantined_bars GROUP BY ticker")
         ).all()
+    if not spans:
+        return
+    generate_calendar(engine, min(s[1] for s in spans), max(s[2] for s in spans))
+    aged = [
+        (ticker, first_seen)
+        for ticker, first_seen, last_seen in spans
+        if count_trading_days(engine, first_seen, last_seen) >= PROVISIONAL_AFTER_TRADING_DAYS
+    ]
+    with engine.begin() as conn:
         for ticker, first_seen in aged:
             security_id = conn.execute(
                 text("INSERT INTO securities (verified) VALUES (false) RETURNING security_id")
@@ -109,9 +118,7 @@ def release_quarantine(engine: Engine, lake: Lake) -> int:
         if security_id is None:
             continue
         by_date.setdefault(q.trading_date, []).append(
-            dict(security_id=security_id, trading_date=q.trading_date, open=q.open, high=q.high, low=q.low,
-                 close=q.close, volume=q.volume, vwap=q.vwap, trade_count=q.trade_count, source=q.source,
-                 fetched_at=q.fetched_at)
+            bar_row(security_id, q.trading_date, q, source=q.source, fetched_at=q.fetched_at)
         )
         released.append((q.ticker, q.trading_date))
         covered.append((security_id, q.trading_date, q.fetched_at))

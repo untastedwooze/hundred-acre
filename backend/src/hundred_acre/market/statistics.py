@@ -14,8 +14,7 @@ from datetime import date
 
 import polars as pl
 
-from hundred_acre.market.adjustments import apply_adjustment
-from hundred_acre.market.lake import Lake, read_bars, read_intraday_bars
+from hundred_acre.market.lake import Lake, read_bars, read_intraday_bars, transaction
 
 METHOD = "regular-session 5m split-adjusted log-return realized volatility; close-to-open overnight return; vwap dollar volume"
 PARAMETERS = {"interval": "5m", "session": "regular", "adjustment": "split", "avg_volume_windows": [20, 60]}
@@ -49,13 +48,13 @@ def _fingerprints(con) -> dict[int, str]:
 
 def _compute(lake: Lake, security_id: int) -> pl.DataFrame:
     daily = read_bars(lake, [security_id], date.min, date.max, basis="split").sort("trading_date")
-    raw = read_bars(lake, [security_id], date.min, date.max, columns=["trading_date", "vwap", "volume"])
+    unadjusted = read_bars(lake, [security_id], date.min, date.max, columns=["trading_date", "vwap", "volume"])
     intraday = read_intraday_bars(
-        lake, [security_id], date.min, date.max, columns=["security_id", "trading_date", "bar_start", "close"]
+        lake, [security_id], date.min, date.max, columns=["trading_date", "bar_start", "close"], basis="split"
     )
     vol = pl.DataFrame(schema={"trading_date": pl.Date, "realized_volatility": pl.Float64})
     if intraday.height:
-        adjusted = apply_adjustment(lake, intraday, "split").sort("bar_start")
+        adjusted = intraday.sort("bar_start")
         vol = (
             adjusted.with_columns(r=pl.col("close").log().diff().over("trading_date"))
             .group_by("trading_date")
@@ -69,7 +68,7 @@ def _compute(lake: Lake, security_id: int) -> pl.DataFrame:
             avg_volume_20=pl.col("volume").rolling_mean(20, min_samples=20),
             avg_volume_60=pl.col("volume").rolling_mean(60, min_samples=60),
         )
-        .join(raw.select("trading_date", dollar_volume=pl.col("vwap") * pl.col("volume")), on="trading_date")
+        .join(unadjusted.select("trading_date", dollar_volume=pl.col("vwap") * pl.col("volume")), on="trading_date")
         .join(vol, on="trading_date", how="left")
     )
 
@@ -100,10 +99,9 @@ def refresh_statistics(lake: Lake, *, security_ids: list[int] | None = None, ful
         )
         with lake.connect() as con:
             con.register("incoming", frame.to_arrow())
-            con.execute("BEGIN")
-            con.execute("DELETE FROM lake.daily_security_statistics WHERE security_id = ?", [sid])
-            con.execute("INSERT INTO lake.daily_security_statistics SELECT * FROM incoming")
-            con.execute("COMMIT")
+            with transaction(con):
+                con.execute("DELETE FROM lake.daily_security_statistics WHERE security_id = ?", [sid])
+                con.execute("INSERT INTO lake.daily_security_statistics SELECT * FROM incoming")
     return StatisticsResult(todo)
 
 

@@ -4,7 +4,7 @@ import os
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import duckdb
@@ -108,40 +108,57 @@ class Lake:
             con.close()
 
 
+@contextmanager
+def transaction(con: duckdb.DuckDBPyConnection) -> Iterator[None]:
+    """BEGIN ... COMMIT around the block, ROLLBACK if it raises."""
+    con.execute("BEGIN")
+    try:
+        yield
+    except BaseException:
+        con.execute("ROLLBACK")
+        raise
+    con.execute("COMMIT")
+
+
+def bar_row(security_id: int, trading_date: date, bar, *, source: str, fetched_at: datetime, **extra) -> dict:
+    """One Bar as a row dict for BAR_SCHEMA (or INTRADAY_SCHEMA with `extra`); `bar` is any object with price fields."""
+    return dict(
+        security_id=security_id, trading_date=trading_date, open=bar.open, high=bar.high, low=bar.low, close=bar.close,
+        volume=bar.volume, vwap=bar.vwap, trade_count=bar.trade_count, source=source, fetched_at=fetched_at, **extra,
+    )
+
+
 def write_bars(lake: Lake, bars: pl.DataFrame, trading_date: date) -> None:
     """Replace `trading_date`'s Daily Bars with `bars` in one transaction (re-runs are idempotent)."""
     with lake.connect() as con:
         con.register("incoming", bars.select(BAR_COLUMNS).to_arrow())
-        con.execute("BEGIN")
-        con.execute("DELETE FROM lake.daily_bars WHERE trading_date = ?", [trading_date])
-        con.execute("INSERT INTO lake.daily_bars SELECT * FROM incoming")
-        con.execute("COMMIT")
+        with transaction(con):
+            con.execute("DELETE FROM lake.daily_bars WHERE trading_date = ?", [trading_date])
+            con.execute("INSERT INTO lake.daily_bars SELECT * FROM incoming")
 
 
 def replace_bars(lake: Lake, bars: pl.DataFrame, security_ids: Sequence[int], days: Sequence[date]) -> None:
     """Replace `security_ids`' Daily Bars on `days` with `bars` in one transaction."""
     with lake.connect() as con:
         con.register("incoming", bars.select(BAR_COLUMNS).to_arrow())
-        con.execute("BEGIN")
-        con.execute(
-            "DELETE FROM lake.daily_bars WHERE list_contains(?, security_id) AND list_contains(?, trading_date)",
-            [list(security_ids), list(days)],
-        )
-        con.execute("INSERT INTO lake.daily_bars SELECT * FROM incoming")
-        con.execute("COMMIT")
+        with transaction(con):
+            con.execute(
+                "DELETE FROM lake.daily_bars WHERE list_contains(?, security_id) AND list_contains(?, trading_date)",
+                [list(security_ids), list(days)],
+            )
+            con.execute("INSERT INTO lake.daily_bars SELECT * FROM incoming")
 
 
 def add_bars(lake: Lake, bars: pl.DataFrame, trading_date: date) -> None:
     """Add Bars to `trading_date`, replacing only those of the same Securities and leaving other Bars untouched."""
     with lake.connect() as con:
         con.register("incoming", bars.select(BAR_COLUMNS).to_arrow())
-        con.execute("BEGIN")
-        con.execute(
-            "DELETE FROM lake.daily_bars WHERE trading_date = ? AND security_id IN (SELECT security_id FROM incoming)",
-            [trading_date],
-        )
-        con.execute("INSERT INTO lake.daily_bars SELECT * FROM incoming")
-        con.execute("COMMIT")
+        with transaction(con):
+            con.execute(
+                "DELETE FROM lake.daily_bars WHERE trading_date = ? AND security_id IN (SELECT security_id FROM incoming)",
+                [trading_date],
+            )
+            con.execute("INSERT INTO lake.daily_bars SELECT * FROM incoming")
 
 
 DEFAULT_SNAPSHOT_RETENTION_DAYS = 90
@@ -212,13 +229,12 @@ def replace_intraday_bars(lake: Lake, bars: pl.DataFrame, security_ids: Sequence
     """Replace `security_ids`' Intraday Bars on trading `days` with `bars` in one transaction, sorted by Security then bar_start."""
     with lake.connect() as con:
         con.register("incoming", bars.select(INTRADAY_COLUMNS).sort("security_id", "bar_start").to_arrow())
-        con.execute("BEGIN")
-        con.execute(
-            "DELETE FROM lake.intraday_bars WHERE list_contains(?, security_id) AND list_contains(?, trading_date)",
-            [list(security_ids), list(days)],
-        )
-        con.execute("INSERT INTO lake.intraday_bars SELECT * FROM incoming ORDER BY security_id, bar_start")
-        con.execute("COMMIT")
+        with transaction(con):
+            con.execute(
+                "DELETE FROM lake.intraday_bars WHERE list_contains(?, security_id) AND list_contains(?, trading_date)",
+                [list(security_ids), list(days)],
+            )
+            con.execute("INSERT INTO lake.intraday_bars SELECT * FROM incoming ORDER BY security_id, bar_start")
 
 
 def read_intraday_bars(
@@ -229,11 +245,16 @@ def read_intraday_bars(
     columns: Sequence[str] | None = None,
     sessions: str | Sequence[str] | None = "regular",
     snapshot: int | None = None,
+    basis: str = "none",
 ) -> pl.DataFrame:
     """Unadjusted five-minute Bars for `security_ids` with `start <= trading_date <= end`, by Security then bar_start.
 
     Reads the regular Trading Session by default; `sessions` names one or several sessions, or None for all of them.
+    `basis` is "none", "split" or "total_return" as for `read_bars`: prices are multiplied by the Adjustment Factor of
+    the Bar's trading day at read time and volume divided by the split factor.
     """
+    if basis not in BASES:
+        raise ValueError(f"unknown adjustment basis: {basis!r}; expected one of {BASES}")
     wanted = list(columns) if columns is not None else list(INTRADAY_COLUMNS)
     unknown = set(wanted) - set(INTRADAY_COLUMNS)
     if unknown:
@@ -242,10 +263,16 @@ def read_intraday_bars(
     at = f" AT (VERSION => {int(snapshot)})" if snapshot is not None else ""
     session_filter = "" if chosen is None else " AND list_contains(?, trading_session)"
     params = [list(security_ids), start, end] + ([chosen] if chosen is not None else [])
+    fetch = wanted if basis == "none" else wanted + [c for c in ("security_id", "trading_date") if c not in wanted]
     with lake.connect() as con:
-        return con.sql(
-            f"SELECT {', '.join(wanted)} FROM lake.intraday_bars{at} "
+        df = con.sql(
+            f"SELECT {', '.join(fetch)} FROM lake.intraday_bars{at} "
             f"WHERE list_contains(?, security_id) AND trading_date BETWEEN ? AND ?{session_filter} "
             "ORDER BY security_id, bar_start",
             params=params,
         ).pl()
+    if basis == "none":
+        return df
+    from hundred_acre.market.adjustments import apply_adjustment
+
+    return apply_adjustment(lake, df, basis).select(wanted)
