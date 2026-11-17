@@ -1,5 +1,6 @@
 """Nightly market-data jobs."""
 
+import os
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
@@ -8,7 +9,10 @@ from sqlalchemy import Engine, text
 
 from hundred_acre.market.coverage import days_to_fetch, record_coverage
 from hundred_acre.market.lake import BAR_SCHEMA as _SCHEMA
-from hundred_acre.market.lake import INTRADAY_SCHEMA, Lake, expire_snapshots, replace_bars, replace_intraday_bars, write_bars
+from hundred_acre.market.lake import (
+    INTRADAY_SCHEMA, Lake, expire_snapshots, read_bars, read_intraday_bars, replace_bars, replace_intraday_bars,
+    write_bars,
+)
 from hundred_acre.market.sessions import assign_sessions
 from hundred_acre.market.quarantine import quarantine_bars, release_quarantine
 from hundred_acre.market.reference import security_on, sync_reference
@@ -215,3 +219,67 @@ def run_backfill(source: MarketDataSource, as_of: date, *, engine: Engine, lake:
 def nightly_intraday_bars(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> None:
     """Load the Watchlist's Intraday Bars for `as_of`, plus any day of the past week still missing (e.g. after a failure)."""
     backfill_intraday_bars(source, as_of, engine=engine, lake=lake, since=as_of - timedelta(days=7))
+
+
+DEFAULT_VOLUME_MISMATCH_THRESHOLD = 0.05
+WEEKLY_SKIPPED_TYPES = ("warrant", "unit", "right")  # these keep Daily Bars but get no Intraday Bars
+
+
+def volume_mismatch_threshold() -> float:
+    """Relative Intraday-vs-Daily volume difference above which a day is suspect; MARKET_VOLUME_MISMATCH_THRESHOLD."""
+    return float(os.environ.get("MARKET_VOLUME_MISMATCH_THRESHOLD", DEFAULT_VOLUME_MISMATCH_THRESHOLD))
+
+
+def mark_suspect_days(
+    engine: Engine, lake: Lake, security_ids: list[int], start: date, end: date, *, threshold: float | None = None
+) -> list[tuple[int, date]]:
+    """Mark suspect the complete Intraday days in [start, end] whose total volume (all Trading Sessions) differs from
+    the Daily Bar's volume by more than `threshold` (default: configured). Days without a Daily Bar are not judged."""
+    limit = volume_mismatch_threshold() if threshold is None else threshold
+    if not security_ids:
+        return []
+    daily = read_bars(lake, security_ids, start, end, columns=["security_id", "trading_date", "volume"])
+    intraday = (
+        read_intraday_bars(lake, security_ids, start, end, columns=["security_id", "trading_date", "volume"], sessions=None)
+        .group_by("security_id", "trading_date")
+        .agg(pl.col("volume").sum().alias("intraday_volume"))
+    )
+    suspect = (
+        daily.join(intraday, on=["security_id", "trading_date"])
+        .filter((pl.col("intraday_volume") - pl.col("volume")).abs() > limit * pl.col("volume"))
+        .select("security_id", "trading_date")
+        .rows()
+    )
+    now = datetime.now(timezone.utc)
+    with engine.begin() as conn:
+        for security_id, day in suspect:
+            conn.execute(
+                text(
+                    "UPDATE coverage SET status = 'suspect', fetched_at = :f WHERE security_id = :s AND interval = :i "
+                    "AND trading_date = :d AND status = 'complete'"
+                ),
+                {"f": now, "s": security_id, "i": INTRADAY_INTERVAL, "d": day},
+            )
+    return suspect
+
+
+def run_weekly(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> None:
+    """The `weekly` job: a week of Intraday Bars for every non-Watchlist Security (one call each, warrants, units and
+    rights skipped), then suspect detection against Daily Bars with a re-fetch of each suspect day."""
+    since = as_of - timedelta(days=7)
+    sync_reference(source, engine)
+    with engine.connect() as conn:
+        ids = list(
+            conn.execute(
+                text(
+                    "SELECT security_id FROM securities WHERE security_id NOT IN (SELECT security_id FROM watchlist) "
+                    "AND (type IS NULL OR type <> ALL(:skipped)) ORDER BY security_id"
+                ),
+                {"skipped": list(WEEKLY_SKIPPED_TYPES)},
+            ).scalars()
+        )
+    backfill_intraday_bars(source, as_of, engine=engine, lake=lake, since=since, security_ids=ids)
+    if mark_suspect_days(engine, lake, ids, since, as_of):
+        # Suspect days are not complete, so the same backfill now fetches exactly those days and replaces them atomically.
+        backfill_intraday_bars(source, as_of, engine=engine, lake=lake, since=since, security_ids=ids)
+        mark_suspect_days(engine, lake, ids, since, as_of)  # a mismatch the re-fetch did not resolve stays suspect
