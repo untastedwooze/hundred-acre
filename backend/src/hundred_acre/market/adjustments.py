@@ -14,7 +14,7 @@ from datetime import date
 import polars as pl
 from sqlalchemy import Engine, text
 
-from hundred_acre.market.lake import Lake, read_bars
+from hundred_acre.market.lake import Lake, read_bars, transaction
 from hundred_acre.market.reference import security_on
 from hundred_acre.market.source import MarketDataSource
 
@@ -30,6 +30,7 @@ class CorporateAction:
     split_to: float | None
     cash_amount: float | None
     current: bool
+    dividend_type: str | None = None
 
 
 @dataclass
@@ -44,7 +45,7 @@ def corporate_action_history(engine: Engine, security_id: int) -> list[Corporate
             text(
                 "SELECT r.kind, r.source_key, r.revision, r.security_id, r.action_date, r.split_from, r.split_to, "
                 "r.cash_amount, r.revision = (SELECT max(revision) FROM corporate_action_revisions x "
-                "WHERE x.kind = r.kind AND x.source_key = r.source_key) "
+                "WHERE x.kind = r.kind AND x.source_key = r.source_key), r.dividend_type "
                 "FROM corporate_action_revisions r WHERE r.security_id = :s ORDER BY r.action_date, r.kind, r.revision"
             ),
             {"s": security_id},
@@ -55,35 +56,35 @@ def corporate_action_history(engine: Engine, security_id: int) -> list[Corporate
 def sync_corporate_actions(source: MarketDataSource, since: date, *, engine: Engine, lake: Lake) -> SyncResult:
     """Record new or revised splits and dividends since `since`, then rebuild factors of the Securities they changed."""
     incoming = [
-        ("split", s.id or f"{s.ticker}:{s.execution_date}", s.ticker, s.execution_date, s.split_from, s.split_to, None)
+        ("split", s.id or f"{s.ticker}:{s.execution_date}", s.ticker, s.execution_date, s.split_from, s.split_to, None, None)
         for s in source.splits(since)
     ] + [
-        ("dividend", d.id or f"{d.ticker}:{d.ex_dividend_date}", d.ticker, d.ex_dividend_date, None, None, d.cash_amount)
+        ("dividend", d.id or f"{d.ticker}:{d.ex_dividend_date}", d.ticker, d.ex_dividend_date, None, None, d.cash_amount, d.dividend_type)
         for d in source.dividends(since)
     ]
     changed: set[int] = set()
-    for kind, key, ticker, day, split_from, split_to, cash in incoming:
+    for kind, key, ticker, day, split_from, split_to, cash, dividend_type in incoming:
         security_id = security_on(engine, ticker, day)
         if security_id is None:
             continue
         with engine.begin() as conn:
             latest = conn.execute(
                 text(
-                    "SELECT revision, security_id, action_date, split_from, split_to, cash_amount "
+                    "SELECT revision, security_id, action_date, split_from, split_to, cash_amount, dividend_type "
                     "FROM corporate_action_revisions WHERE kind = :k AND source_key = :key ORDER BY revision DESC LIMIT 1"
                 ),
                 {"k": kind, "key": key},
             ).first()
-            if latest is not None and tuple(latest[1:]) == (security_id, day, split_from, split_to, cash):
+            if latest is not None and tuple(latest[1:]) == (security_id, day, split_from, split_to, cash, dividend_type):
                 continue
             conn.execute(
                 text(
                     "INSERT INTO corporate_action_revisions "
-                    "(kind, source_key, revision, security_id, action_date, split_from, split_to, cash_amount) "
-                    "VALUES (:k, :key, :rev, :s, :d, :f, :t, :c)"
+                    "(kind, source_key, revision, security_id, action_date, split_from, split_to, cash_amount, dividend_type) "
+                    "VALUES (:k, :key, :rev, :s, :d, :f, :t, :c, :dt)"
                 ),
                 {"k": kind, "key": key, "rev": (latest[0] + 1) if latest else 1, "s": security_id, "d": day,
-                 "f": split_from, "t": split_to, "c": cash},
+                 "f": split_from, "t": split_to, "c": cash, "dt": dividend_type},
             )
         changed.add(security_id)
         if latest is not None:
@@ -126,10 +127,9 @@ def rebuild_adjustment_factors(engine: Engine, lake: Lake, security_id: int) -> 
     )
     with lake.connect() as con:
         con.register("incoming", frame.to_arrow())
-        con.execute("BEGIN")
-        con.execute("DELETE FROM lake.adjustment_factors WHERE security_id = ?", [security_id])
-        con.execute("INSERT INTO lake.adjustment_factors SELECT * FROM incoming")
-        con.execute("COMMIT")
+        with transaction(con):
+            con.execute("DELETE FROM lake.adjustment_factors WHERE security_id = ?", [security_id])
+            con.execute("INSERT INTO lake.adjustment_factors SELECT * FROM incoming")
 
 
 _PRICE_COLUMNS = ("open", "high", "low", "close", "vwap")

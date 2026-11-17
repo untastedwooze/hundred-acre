@@ -62,6 +62,7 @@ class Dividend:
     ex_dividend_date: date
     cash_amount: float
     id: str | None = None  # Massive's record id; a revised record keeps its id
+    dividend_type: str | None = None  # Massive: CD regular, SC special, LT/ST capital gains
 
 
 @dataclass(frozen=True)
