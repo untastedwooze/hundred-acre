@@ -42,6 +42,13 @@ CREATE TABLE IF NOT EXISTS lake.daily_bars (
     trade_count BIGINT, source VARCHAR, fetched_at TIMESTAMPTZ
 )"""
 
+_CREATE_FACTORS = """
+CREATE TABLE IF NOT EXISTS lake.adjustment_factors (
+    security_id BIGINT, trading_date DATE, split_factor DOUBLE, total_return_factor DOUBLE
+)"""
+
+BASES = ("none", "split", "total_return")
+
 
 @dataclass(frozen=True)
 class Lake:
@@ -75,6 +82,7 @@ class Lake:
                 == 0
             )
             con.execute(_CREATE_BARS)
+            con.execute(_CREATE_FACTORS)
             if new:
                 con.execute("ALTER TABLE lake.daily_bars SET PARTITIONED BY (year(trading_date))")
             new_intraday = (
@@ -161,24 +169,35 @@ def read_bars(
     end: date,
     columns: Sequence[str] | None = None,
     snapshot: int | None = None,
+    basis: str = "none",
 ) -> pl.DataFrame:
     """Unadjusted Daily Bars for `security_ids` with `start <= trading_date <= end`, as a Polars DataFrame.
 
     `columns` limits the columns returned (default: all), in the order asked. `snapshot` reads the Bars as they were
     at that DuckLake snapshot (see `current_snapshot`), e.g. before a late correction replaced them.
+    `basis` is "none" (Unadjusted), "split" or "total_return": prices are multiplied by the Adjustment Factor at read
+    time and volume divided by the split factor; stored Bars are untouched.
     """
+    if basis not in BASES:
+        raise ValueError(f"unknown adjustment basis: {basis!r}; expected one of {BASES}")
     wanted = list(columns) if columns is not None else list(BAR_COLUMNS)
     unknown = set(wanted) - set(BAR_COLUMNS)
     if unknown:
         raise ValueError(f"unknown Bar columns: {sorted(unknown)}")
-    select = ", ".join(wanted)
+    fetch = wanted if basis == "none" else wanted + [c for c in ("security_id", "trading_date") if c not in wanted]
+    select = ", ".join(fetch)
     at = f" AT (VERSION => {int(snapshot)})" if snapshot is not None else ""
     with lake.connect() as con:
-        return con.sql(
+        df = con.sql(
             f"SELECT {select} FROM lake.daily_bars{at} WHERE list_contains(?, security_id) AND trading_date BETWEEN ? AND ? "
             "ORDER BY security_id, trading_date",
             params=[list(security_ids), start, end],
         ).pl()
+    if basis == "none":
+        return df
+    from hundred_acre.market.adjustments import apply_adjustment
+
+    return apply_adjustment(lake, df, basis).select(wanted)
 
 
 def replace_intraday_bars(lake: Lake, bars: pl.DataFrame, security_ids: Sequence[int], days: Sequence[date]) -> None:
