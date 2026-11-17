@@ -1,0 +1,17 @@
+# Dedicated hundred-acre Postgres (ADR-0001, ADR-0002): hosts `hundred_acre_market`
+name: hundred-acre
+# (market-data reference tables and the DuckLake catalog). Port 5433 avoids clashing with other local Postgres servers.
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: hundred_acre
+      POSTGRES_PASSWORD: hundred_acre
+      POSTGRES_DB: hundred_acre_market
+    ports:
+      - "5433:5432"
+    volumes:
+      - hundred_acre_pg:/var/lib/postgresql/data
+volumes:
+  hundred_acre_pg:
