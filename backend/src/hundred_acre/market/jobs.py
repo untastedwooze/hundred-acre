@@ -4,10 +4,10 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 
 import polars as pl
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine
 
 from hundred_acre.market.lake import Lake, write_bars
-from hundred_acre.market.reference import sync_reference
+from hundred_acre.market.reference import security_on, sync_reference
 from hundred_acre.market.source import MarketDataSource
 
 SOURCE_NAME = "massive"
@@ -31,13 +31,10 @@ def load_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine, la
     """Sync reference data, then load `as_of`'s Unadjusted grouped-daily Bars (OTC excluded) into the lake."""
     sync_reference(source, engine)
     bars = source.grouped_daily(as_of, adjusted=False, include_otc=False)
-    with engine.connect() as conn:
-        ids = {t: s for t, s in conn.execute(text("SELECT ticker, security_id FROM tickers"))}
-
     fetched_at = datetime.now(timezone.utc)
     rows, matched, unmatched = [], {}, []
     for b in bars:
-        security_id = ids.get(b.ticker)
+        security_id = security_on(engine, b.ticker, as_of)
         if security_id is None:
             unmatched.append(b.ticker)
             continue
