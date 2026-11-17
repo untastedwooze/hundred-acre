@@ -8,7 +8,7 @@ from sqlalchemy import Engine, text
 
 from hundred_acre.market.coverage import days_to_fetch, record_coverage
 from hundred_acre.market.lake import Lake, expire_snapshots, replace_bars, write_bars
-from hundred_acre.market.reference import sync_reference
+from hundred_acre.market.reference import security_on, sync_reference
 from hundred_acre.market.source import MarketDataSource, MarketDataUnavailable
 from hundred_acre.market.trading_calendar import generate_calendar
 
@@ -33,13 +33,10 @@ def load_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine, la
     """Sync reference data, then load `as_of`'s Unadjusted grouped-daily Bars (OTC excluded) into the lake."""
     sync_reference(source, engine)
     bars = source.grouped_daily(as_of, adjusted=False, include_otc=False)
-    with engine.connect() as conn:
-        ids = {t: s for t, s in conn.execute(text("SELECT ticker, security_id FROM tickers"))}
-
     fetched_at = datetime.now(timezone.utc)
     rows, matched, unmatched = [], {}, []
     for b in bars:
-        security_id = ids.get(b.ticker)
+        security_id = security_on(engine, b.ticker, as_of)
         if security_id is None:
             unmatched.append(b.ticker)
             continue
@@ -82,9 +79,15 @@ def backfill_daily_bars(
     generate_calendar(engine, start, as_of)
     sync_reference(source, engine)
     with engine.connect() as conn:
-        universe = conn.execute(text("SELECT ticker, security_id FROM tickers ORDER BY ticker")).all()
-    for ticker, security_id in universe:
-        missing = days_to_fetch(engine, security_id, "1d", start, as_of)
+        periods = conn.execute(
+            text("SELECT ticker, security_id, valid_from, valid_to FROM ticker_periods ORDER BY ticker, valid_from")
+        ).all()
+    for ticker, security_id, valid_from, valid_to in periods:  # each Ticker is fetched only for the days it was in use
+        missing = [
+            d
+            for d in days_to_fetch(engine, security_id, "1d", start, as_of)
+            if (valid_from is None or d >= valid_from) and (valid_to is None or d <= valid_to)
+        ]
         if not missing:
             continue
         fetched_at = datetime.now(timezone.utc)

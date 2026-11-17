@@ -33,12 +33,15 @@ class TickerRecord:
     market: str  # "stocks", "otc", ...
     share_class_figi: str | None
     active: bool = True
+    cik: str | None = None  # Issuer
+    list_date: date | None = None  # first day trading
+    delisted_date: date | None = None  # last day trading
 
 
 @dataclass(frozen=True)
 class TickerEvent:
-    ticker: str
-    date: date
+    ticker: str  # the Ticker before the change
+    date: date  # first day the Security traded as new_ticker
     type: str  # e.g. "ticker_change"
     new_ticker: str | None = None
 

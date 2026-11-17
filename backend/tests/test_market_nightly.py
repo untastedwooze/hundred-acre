@@ -24,7 +24,7 @@ def aapl_id(engine):
     from sqlalchemy import text
 
     with engine.connect() as conn:
-        return conn.execute(text("SELECT security_id FROM tickers WHERE ticker = 'AAPL'")).scalar_one()
+        return conn.execute(text("SELECT security_id FROM ticker_periods WHERE ticker = 'AAPL'")).scalar_one()
 
 
 def test_nightly_refetches_the_previous_trading_day_and_replaces_it_atomically(market_engine, lake):

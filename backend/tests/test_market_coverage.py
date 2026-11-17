@@ -38,7 +38,7 @@ def ids_of(engine):
     from sqlalchemy import text
 
     with engine.connect() as conn:
-        return dict(conn.execute(text("SELECT ticker, security_id FROM tickers")).all())
+        return dict(conn.execute(text("SELECT ticker, security_id FROM ticker_periods")).all())
 
 
 def backfill(source, engine, lake, *, as_of=LAST):
