@@ -78,6 +78,24 @@ _Avoid_: Metrics, indicators, features
 The curated set of Securities whose Intraday Bars are refreshed nightly. All other Securities in the Universe have their Intraday Bars refreshed weekly.
 _Avoid_: Curated list, portfolio
 
+### Massive access
+
+**Request Engine**:
+The single process that makes every Call to Massive, serving queued Requests from all callers in priority order within Massive's rate limit. It is either running or **halted**; a halted Request Engine makes no Calls until resumed by hand, typically after Massive rejects its credentials.
+_Avoid_: Rate limiter, throttle, API client, engine (that means a database connection)
+
+**Request**:
+A caller's ask for one Massive query, waiting in the Request Engine's queue with a priority class and kept together with every response it received. Answering one Request can take several Calls, one per page of results. Identical Requests asked for at the same time are answered once. A Request is **queued**, **in progress**, **complete**, **failed** (a permanent error or too many transient ones) or **abandoned** (no caller was still waiting for it).
+_Avoid_: Job, task, fetch
+
+**Priority Class**:
+The named urgency of a Request, which decides the order the Request Engine serves them in: interactive (a person is waiting), nightly Watchlist, nightly Daily, weekly Universe, then backfill.
+_Avoid_: Priority number, weight
+
+**Call**:
+One HTTP hit against Massive, made while answering a Request. Calls are what Massive's rate limit counts.
+_Avoid_: Request (that means the whole query), hit
+
 ### Development spend
 
 **Spend**:
