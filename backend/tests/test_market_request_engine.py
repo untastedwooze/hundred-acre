@@ -532,3 +532,20 @@ def test_polling_alone_completes_a_wait_when_notifications_are_lost(world):
     w = world({GROUPED: {"results": [BAR]}})  # World's source waits by sleeping and polling: no notification used
     bars = w.source.grouped_daily(date(2026, 11, 13), adjusted=False, include_otc=False)
     assert bars[0].ticker == "AAPL"
+
+
+def test_response_bodies_older_than_90_days_are_pruned_but_call_rows_stay(world):
+    w = world({GROUPED: {"results": [BAR]}})
+    w.source.grouped_daily(date(2026, 11, 13), adjusted=False, include_otc=False)
+    files = list(w.dir.rglob("*.json.gz"))
+    assert len(files) == 1
+    w.clock.now += 89 * 86400
+    w.engine.prune_responses()
+    assert files[0].exists()
+    w.clock.now += 2 * 86400
+    w.engine.prune_responses()
+    assert not files[0].exists()
+    with w.db.connect() as conn:
+        rows = conn.execute(text("SELECT http_status, body_path FROM calls")).all()
+        assert conn.execute(text("SELECT count(*) FROM requests")).scalar_one() == 1
+    assert [(r.http_status, r.body_path) for r in rows] == [(200, None)]
