@@ -14,7 +14,10 @@ from sqlalchemy import Engine, text
 
 from hundred_acre.market import massive as m
 from hundred_acre.market.priority import PriorityClass
-from hundred_acre.market.request_engine import check_engine, enqueue, read_pages
+from hundred_acre.market.request_engine import (
+    LEASE_RENEW_INTERVAL, check_engine, enqueue_as_waiter, read_pages, release_waiters, renew_leases,
+    wait_for_notification,
+)
 from hundred_acre.market.source import (
     BarData, Dividend, MarketDataUnavailable, MarketHoliday, Split, TickerEvent, TickerRecord,
 )
@@ -32,6 +35,8 @@ class EngineSource:
         self._db, self._dir, self._requester = engine, Path(responses_dir), requester
         self._priority = priority
         self._clock, self._sleep, self._poll = clock, sleep, poll_interval
+        # With the real sleep, a waiter wakes on a Postgres notification (the poll interval is only the fallback).
+        self._wait = (lambda t: wait_for_notification(self._db, t)) if sleep is time.sleep else sleep
 
     def __repr__(self) -> str:
         return "EngineSource()"
@@ -45,19 +50,27 @@ class EngineSource:
     def _fetch(self, requests: list[tuple[str, dict]]) -> list[list]:
         """Enqueue the Requests, wait for all of them, and return each one's stored pages."""
         check_engine(self._db, self._clock())
-        ids = [enqueue(self._db, path, params, requester=self._requester, now=self._clock(),
-                         priority=self._priority) for path, params in requests]
-        while True:
-            with self._db.connect() as conn:
-                rows = conn.execute(
-                    text("SELECT id, state, last_error FROM requests WHERE id = ANY(:ids)"), {"ids": ids}).all()
-            for row in rows:
-                if row.state == "failed":
-                    raise MarketDataUnavailable(row.last_error or "request failed")
-            if all(row.state == "complete" for row in rows):
-                return [read_pages(self._db, self._dir, i) for i in ids]
-            check_engine(self._db, self._clock())
-            self._sleep(self._poll)
+        pairs = [enqueue_as_waiter(self._db, path, params, requester=self._requester, now=self._clock(),
+                                   priority=self._priority) for path, params in requests]
+        ids, waiters = [p[0] for p in pairs], [p[1] for p in pairs]
+        last_renewed = self._clock()
+        try:
+            while True:
+                with self._db.connect() as conn:
+                    rows = conn.execute(
+                        text("SELECT id, state, last_error FROM requests WHERE id = ANY(:ids)"), {"ids": ids}).all()
+                for row in rows:
+                    if row.state == "failed":
+                        raise MarketDataUnavailable(row.last_error or "request failed")
+                if all(row.state == "complete" for row in rows):
+                    return [read_pages(self._db, self._dir, i) for i in ids]
+                check_engine(self._db, self._clock())
+                if self._clock() - last_renewed >= LEASE_RENEW_INTERVAL:
+                    renew_leases(self._db, waiters, self._clock())
+                    last_renewed = self._clock()
+                self._wait(self._poll)
+        finally:
+            release_waiters(self._db, waiters)
 
     def _one(self, request: tuple[str, dict]) -> list:
         return self._fetch([request])[0]
