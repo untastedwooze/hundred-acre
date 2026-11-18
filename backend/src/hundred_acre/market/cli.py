@@ -120,6 +120,7 @@ def _request_engine_run(args: argparse.Namespace, engine: Engine | None, request
     try:
         if request_engine is None:
             request_engine = RequestEngine.from_env(engine or create_engine(market_database_url()))
+        request_engine.acquire_lock()
     except RuntimeError as exc:
         print(f"market: {exc}", file=sys.stderr)
         return 1

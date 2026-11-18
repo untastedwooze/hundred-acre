@@ -12,7 +12,7 @@ from pathlib import Path
 from sqlalchemy import Engine, text
 
 from hundred_acre.market import massive as m
-from hundred_acre.market.request_engine import enqueue, read_pages
+from hundred_acre.market.request_engine import check_engine, enqueue, read_pages
 from hundred_acre.market.source import (
     BarData, Dividend, MarketDataUnavailable, MarketHoliday, Split, TickerEvent, TickerRecord,
 )
@@ -34,6 +34,7 @@ class EngineSource:
 
     def _fetch(self, requests: list[tuple[str, dict]]) -> list[list]:
         """Enqueue the Requests, wait for all of them, and return each one's stored pages."""
+        check_engine(self._db, self._clock())
         ids = [enqueue(self._db, path, params, requester=self._requester, now=self._clock()) for path, params in requests]
         while True:
             with self._db.connect() as conn:
@@ -44,6 +45,7 @@ class EngineSource:
                     raise MarketDataUnavailable(row.last_error or "request failed")
             if all(row.state == "complete" for row in rows):
                 return [read_pages(self._db, self._dir, i) for i in ids]
+            check_engine(self._db, self._clock())
             self._sleep(self._poll)
 
     def _one(self, request: tuple[str, dict]) -> list:
