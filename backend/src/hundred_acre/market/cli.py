@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+import time
 from datetime import date, timedelta
 
 from sqlalchemy import Engine, create_engine, text
@@ -17,6 +18,7 @@ from hundred_acre.market.reference import security_on, sync_reference
 from hundred_acre.market.source import MarketDataSource, MarketDataUnavailable
 from hundred_acre.market.watchlist import add_to_watchlist, remove_from_watchlist, watchlist
 
+IDLE_POLL_SECONDS = 1.0
 JOBS = ("reference-sync", "nightly", "weekly", "backfill")
 
 
@@ -27,6 +29,10 @@ def build_parser() -> argparse.ArgumentParser:
     for job in JOBS:
         p = sub.add_parser(job, help=f"run the {job} job")
         p.add_argument("--as-of", type=date.fromisoformat, required=True, help="as-of trading date, YYYY-MM-DD")
+    re_ = sub.add_parser("request-engine", help="the Request Engine, the only process that calls Massive")
+    re_sub = re_.add_subparsers(dest="request_engine_command", required=True)
+    run = re_sub.add_parser("run", help="serve queued Requests (configured by environment variables)")
+    run.add_argument("--once", action="store_true", help="serve until the queue is empty, then exit")
     wl = sub.add_parser("watchlist", help="manage the Watchlist (Securities with nightly Intraday refreshes)")
     wl_sub = wl.add_subparsers(dest="watchlist_command", required=True)
     for name, help_ in (("add", "add a Ticker and backfill its Intraday history"), ("remove", "remove a Ticker")):
@@ -45,11 +51,14 @@ def _job_priority(job: str) -> Priority:
 
 
 def main(argv: list[str] | None = None, *, source: MarketDataSource | None = None,
-         engine: Engine | None = None, lake: Lake | None = None) -> int:
+         engine: Engine | None = None, lake: Lake | None = None, request_engine=None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "migrate":
         migrate()
         return 0
+
+    if args.command == "request-engine":
+        return _request_engine_run(args, engine, request_engine)
 
     if args.command == "watchlist" and args.watchlist_command in ("list", "remove"):
         return _watchlist_offline(args, engine)
@@ -103,6 +112,23 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
         print(f"market: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def _request_engine_run(args: argparse.Namespace, engine: Engine | None, request_engine) -> int:
+    from hundred_acre.market.request_engine import RequestEngine
+
+    try:
+        if request_engine is None:
+            request_engine = RequestEngine.from_env(engine or create_engine(market_database_url()))
+    except RuntimeError as exc:
+        print(f"market: {exc}", file=sys.stderr)
+        return 1
+    if args.once:
+        request_engine.serve()
+        return 0
+    while True:
+        request_engine.serve(until=time.time() + IDLE_POLL_SECONDS)
+        time.sleep(IDLE_POLL_SECONDS)
 
 
 def _watchlist_offline(args: argparse.Namespace, engine: Engine | None) -> int:
