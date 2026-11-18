@@ -72,10 +72,15 @@ class World:
         )
 
     def new_engine(self):
-        return RequestEngine(
+        previous = getattr(self, "engine", None)
+        if previous is not None:
+            previous.release_lock()
+        engine = RequestEngine(
             self.db, MassiveSource(KEY, transport=self.transport), self.dir, clock=self.clock, sleep=self.clock.sleep,
             calls_per_minute=self.per_minute, max_concurrent_calls=self.max_concurrent,
         )
+        engine.acquire_lock()  # as the CLI does: the lock first, then the engine may write
+        return engine
 
 
 @pytest.fixture
@@ -169,6 +174,7 @@ def test_max_concurrent_calls_is_honoured(world):
             enqueue(w.db, path, {}, requester="t", now=w.clock())
         w.engine.serve()
         assert w.transport.max_in_flight == limit
+        w.engine.release_lock()
 
 
 def test_response_bodies_are_gzip_files_and_the_call_row_records_status_duration_size(world, market_engine):
@@ -258,8 +264,8 @@ def test_heartbeat_stays_fresh_during_a_long_rate_limit_wait(world, market_engin
     from hundred_acre.market.request_engine import enqueue
 
     w = world({"/v3/reference/splits": {"results": []}}, per_minute=1)
-    for _ in range(2):
-        enqueue(w.db, "/v3/reference/splits", {}, requester="t", now=w.clock())
+    for i in range(2):  # two distinct Requests (identical ones would coalesce)
+        enqueue(w.db, "/v3/reference/splits", {"i": i}, requester="t", now=w.clock())
     ages = []
 
     def spy(seconds):
@@ -549,3 +555,120 @@ def test_response_bodies_older_than_90_days_are_pruned_but_call_rows_stay(world)
         rows = conn.execute(text("SELECT http_status, body_path FROM calls")).all()
         assert conn.execute(text("SELECT count(*) FROM requests")).scalar_one() == 1
     assert [(r.http_status, r.body_path) for r in rows] == [(200, None)]
+
+
+# ---- review fixes ----
+
+
+def _requests(db):
+    with db.connect() as conn:
+        return conn.execute(text("SELECT id, state, priority, attempts, last_error FROM requests ORDER BY id")).all()
+
+
+def test_a_request_whose_only_caller_died_by_exception_is_abandoned_not_served(world):
+    w = world({SPLITS: {"results": []}}, per_minute=100)
+
+    def boom(_):
+        raise RuntimeError("caller died")
+
+    source = EngineSource(w.db, w.dir, clock=w.clock, sleep=boom, poll_interval=1.0)
+    with pytest.raises(RuntimeError):
+        source.splits(date(2020, 1, 1))
+    w.engine.serve()
+    assert w.transport.calls == []
+    assert [r.state for r in _requests(w.db)] == ["abandoned"]
+
+
+def test_a_second_engine_instance_does_not_touch_a_live_engines_state(world, market_engine):
+    from hundred_acre.market.request_engine import EngineAlreadyRunning
+
+    w = world({SPLITS: {"results": []}})
+    with market_engine.begin() as conn:
+        conn.execute(text("INSERT INTO requests (id, path, params, identity_key, requester, created_at) "
+                          "VALUES (1, '/x', '{}', 'k', 't', 0)"))
+        conn.execute(text("INSERT INTO calls (request_id, page, started_at) VALUES (1, 1, 5)"))
+        beat = conn.execute(text("SELECT heartbeat_at FROM request_engine_state")).scalar()
+    w.clock.now += 1000
+    other = RequestEngine(w.db, MassiveSource(KEY, transport=w.transport), w.dir, clock=w.clock)
+    with pytest.raises(EngineAlreadyRunning):
+        other.acquire_lock()
+    with market_engine.connect() as conn:
+        assert conn.execute(text("SELECT duration FROM calls")).scalar() is None
+        assert conn.execute(text("SELECT heartbeat_at FROM request_engine_state")).scalar() == beat
+
+
+def test_a_completion_racing_a_join_is_not_resurrected(world, market_engine):
+    from hundred_acre.market.request_engine import enqueue_as_waiter
+
+    w = world({SPLITS: {"results": []}})
+    first, _ = enqueue_as_waiter(w.db, SPLITS, {}, requester="t", now=w.clock())
+    result = {}
+    holder = market_engine.connect()
+    tx = holder.begin()
+    holder.execute(text("UPDATE requests SET state = 'complete' WHERE id = :i"), {"i": first})
+
+    t = threading.Thread(target=lambda: result.update(
+        got=enqueue_as_waiter(w.db, SPLITS, {}, requester="t", now=w.clock())))
+    t.start()
+    time.sleep(0.5)  # the join has read 'queued' and is blocked on the row
+    tx.commit()
+    holder.close()
+    t.join(10)
+    assert result["got"][0] != first
+    assert dict((r.id, r.state) for r in _requests(w.db))[first] == "complete"
+
+
+def test_an_unexpected_exception_in_a_call_is_a_failed_attempt_not_an_engine_crash(world):
+    w = world({SPLITS: ValueError("not json")}, per_minute=100)
+    rid = _enqueue(w, SPLITS)
+    w.engine.serve(until=w.clock() + 1)
+    (row,) = _requests(w.db)
+    assert row.attempts >= 1 and "not json" in row.last_error and row.state != "complete"
+
+
+def test_wait_for_notification_returns_the_connection_to_the_pool_clean(market_engine):
+    from hundred_acre.market.request_engine import wait_for_notification
+
+    wait_for_notification(market_engine, 0.05)
+    raw = market_engine.raw_connection()
+    try:
+        assert raw.driver_connection.autocommit is False
+    finally:
+        raw.close()
+
+
+def test_only_one_non_terminal_request_per_identity_even_for_plain_enqueues(world, market_engine):
+    from sqlalchemy.exc import IntegrityError
+
+    w = world({SPLITS: {"results": []}})
+    a, b = _enqueue(w, SPLITS), _enqueue(w, SPLITS)
+    assert a == b
+    with pytest.raises(IntegrityError), market_engine.begin() as conn:
+        conn.execute(text("INSERT INTO requests (path, params, identity_key, requester, created_at) "
+                          "SELECT path, params, identity_key, requester, created_at FROM requests"))
+
+
+def test_a_disk_error_recording_a_response_fails_the_attempt_and_closes_the_call(world, market_engine, tmp_path):
+    w = world({SPLITS: {"results": []}}, per_minute=100)
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file, so the responses directory cannot be created under it")
+    w.engine._dir = blocker
+    _enqueue(w, SPLITS)
+    w.engine.serve(until=w.clock() + 1)
+    with market_engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM calls WHERE duration IS NULL")).scalar() == 0
+    (row,) = _requests(w.db)
+    assert row.attempts >= 1 and row.state != "complete"
+
+
+def test_priority_follows_live_waiters_not_the_highest_ever(world):
+    from hundred_acre.market.priority import PriorityClass as P
+    from hundred_acre.market.request_engine import enqueue, enqueue_as_waiter, release_waiters
+
+    w = world({SPLITS: {"results": []}, DIVS: {"results": []}}, per_minute=100)
+    _, urgent = enqueue_as_waiter(w.db, SPLITS, {}, requester="t", now=w.clock(), priority=P.INTERACTIVE)
+    enqueue_as_waiter(w.db, SPLITS, {}, requester="t", now=w.clock(), priority=P.BACKFILL)
+    release_waiters(w.db, [urgent])
+    enqueue(w.db, DIVS, {}, requester="t", now=w.clock(), priority=P.NIGHTLY_DAILY)
+    w.engine.serve()
+    assert [c[1] for c in w.transport.calls] == [DIVS, SPLITS]

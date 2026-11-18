@@ -19,3 +19,8 @@ PRIORITY_ORDER: tuple[PriorityClass, ...] = (
     PriorityClass.WEEKLY_UNIVERSE,
     PriorityClass.BACKFILL,
 )
+
+
+def at_priority(source, priority: PriorityClass):
+    """`source` at another Priority Class, if it has Priority Classes (the in-memory fake does not)."""
+    return source.with_priority(priority) if hasattr(source, "with_priority") else source
