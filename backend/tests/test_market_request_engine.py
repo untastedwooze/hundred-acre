@@ -216,6 +216,90 @@ def test_cli_request_engine_run_uses_environment_configuration_only(market_engin
         assert conn.execute(text("SELECT state FROM requests")).scalar() == "complete"
 
 
+NOT_RUNNING = "market data unavailable: request engine is not running"
+
+
+def _source(market_engine, tmp_path, clock, sleep=None):
+    return EngineSource(market_engine, tmp_path / "r", clock=clock, sleep=sleep or clock.sleep, poll_interval=1.0)
+
+
+def test_source_fails_immediately_with_no_heartbeat_or_a_stale_one(market_engine, tmp_path):
+    clock = FakeClock()
+    src = _source(market_engine, tmp_path, clock)
+    with pytest.raises(MarketDataUnavailable, match=NOT_RUNNING):
+        src.splits(date(2020, 1, 1))
+    with market_engine.begin() as conn:
+        conn.execute(text("UPDATE request_engine_state SET heartbeat_at = :t"), {"t": clock() - 61})
+    with pytest.raises(MarketDataUnavailable, match=NOT_RUNNING):
+        src.splits(date(2020, 1, 1))
+    with market_engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM requests")).scalar() == 0
+
+
+def test_source_fails_immediately_when_the_engine_is_halted(market_engine, tmp_path):
+    clock = FakeClock()
+    with market_engine.begin() as conn:
+        conn.execute(text(
+            "UPDATE request_engine_state SET state = 'halted', halt_reason = 'HTTP 401', heartbeat_at = :t"), {"t": clock()})
+    with pytest.raises(MarketDataUnavailable, match="market data unavailable: request engine halted: HTTP 401"):
+        _source(market_engine, tmp_path, clock).splits(date(2020, 1, 1))
+
+
+def test_a_waiting_caller_fails_when_the_heartbeat_goes_stale_mid_wait(world):
+    w = world({"/v3/reference/splits": {"results": []}})
+    start = w.clock()
+    w.source = _source(w.db, w.dir.parent, w.clock)  # nobody serves while it waits: the engine is dead
+    with pytest.raises(MarketDataUnavailable, match=NOT_RUNNING):
+        w.source.splits(date(2020, 1, 1))
+    assert w.clock() - start >= 60
+
+
+def test_heartbeat_stays_fresh_during_a_long_rate_limit_wait(world, market_engine):
+    from hundred_acre.market.request_engine import enqueue
+
+    w = world({"/v3/reference/splits": {"results": []}}, per_minute=1)
+    for _ in range(2):
+        enqueue(w.db, "/v3/reference/splits", {}, requester="t", now=w.clock())
+    ages = []
+
+    def spy(seconds):
+        w.clock.sleep(seconds)
+        with market_engine.connect() as conn:
+            ages.append(w.clock() - conn.execute(text("SELECT heartbeat_at FROM request_engine_state")).scalar())
+
+    w.engine._sleep = spy
+    w.engine.serve()
+    assert len(w.transport.calls) == 2 and max(ages) <= 15
+
+
+def test_a_second_engine_exits_immediately_and_makes_no_calls(market_engine, tmp_path, capsys):
+    from hundred_acre.market.cli import main
+    from hundred_acre.market.request_engine import enqueue
+
+    clock = FakeClock()
+    transport = FakeTransport({GROUPED: {"results": [BAR]}})
+
+    def make():
+        return RequestEngine(market_engine, MassiveSource(KEY, transport=transport), tmp_path / "r", clock=clock)
+
+    first = make()
+    first.acquire_lock()
+    enqueue(market_engine, GROUPED, {}, requester="t", now=clock())
+    assert main(["request-engine", "run", "--once"], engine=market_engine, request_engine=make()) == 1
+    assert "already running" in capsys.readouterr().err
+    assert transport.calls == []
+    first.release_lock()
+    assert main(["request-engine", "run", "--once"], engine=market_engine, request_engine=make()) == 0
+    assert len(transport.calls) == 1
+
+
+def test_market_cli_job_with_the_engine_down_exits_1_with_the_not_running_message(market_engine, tmp_path, lake, capsys):
+    from hundred_acre.market.cli import main
+
+    src = _source(market_engine, tmp_path, FakeClock())
+    assert main(["reference-sync", "--as-of", "2026-11-13"], source=src, engine=market_engine, lake=lake) == 1
+    assert NOT_RUNNING in capsys.readouterr().err
+
 SPLITS = "/v3/reference/splits"
 DIVS = "/v3/reference/dividends"
 

@@ -21,10 +21,27 @@ from hundred_acre.market.source import MarketDataUnavailable
 DEFAULT_CALLS_PER_MINUTE = 5
 DEFAULT_MAX_CONCURRENT_CALLS = 1
 WINDOW_SECONDS = 60.0
+HEARTBEAT_INTERVAL = 10.0
+STALE_AFTER = 60.0  # a heartbeat older than this means the engine is not running
+ADVISORY_LOCK_KEY = 0x48554E44  # "HUND": held for as long as a Request Engine runs
 MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 1.0  # a Request's nth failed attempt waits base * 2**(n-1) before the next
 RATE_LIMITED_PAUSE_SECONDS = 60.0
 _BLOCKED_BY_OTHERS_RETRY = 1.0  # seconds to wait when Calls made elsewhere hold every concurrency slot
+
+
+class EngineAlreadyRunning(RuntimeError):
+    pass
+
+
+def check_engine(engine: Engine, now: float) -> None:
+    """Raise MarketDataUnavailable unless a Request Engine is alive and not halted."""
+    with engine.connect() as conn:
+        row = conn.execute(text("SELECT state, halt_reason, heartbeat_at FROM request_engine_state WHERE id = 1")).one()
+    if row.state == "halted":
+        raise MarketDataUnavailable(f"market data unavailable: request engine halted: {row.halt_reason}")
+    if row.heartbeat_at is None or now - row.heartbeat_at > STALE_AFTER:
+        raise MarketDataUnavailable("market data unavailable: request engine is not running")
 
 
 def identity_key(path: str, params: dict) -> str:
@@ -73,9 +90,12 @@ class RequestEngine:
         self._db, self._massive, self._dir = engine, massive, Path(responses_dir)
         self._per_minute, self._max_concurrent = calls_per_minute, max_concurrent_calls
         self._clock, self._sleep = clock, sleep
+        self._lock_conn = None
+        self._last_beat: float | None = None
         with self._db.begin() as conn:  # Calls left in flight by a dead predecessor will never finish
             conn.execute(text(
                 "UPDATE calls SET duration = 0, http_status = 0 WHERE duration IS NULL"))
+        self._heartbeat(self._clock())
 
     def __repr__(self) -> str:
         return "RequestEngine()"
@@ -92,6 +112,28 @@ class RequestEngine:
             max_concurrent_calls=int(os.environ.get("MASSIVE_MAX_CONCURRENT_CALLS", DEFAULT_MAX_CONCURRENT_CALLS)),
             **kwargs,
         )
+
+    def acquire_lock(self) -> None:
+        """Take the Postgres advisory lock that makes this the only running engine; raises EngineAlreadyRunning."""
+        conn = self._db.connect()
+        if not conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": ADVISORY_LOCK_KEY}).scalar_one():
+            conn.close()
+            raise EngineAlreadyRunning("a Request Engine is already running against this database")
+        self._lock_conn = conn
+
+    def release_lock(self) -> None:
+        if self._lock_conn is not None:
+            self._lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": ADVISORY_LOCK_KEY})
+            self._lock_conn.close()
+            self._lock_conn = None
+
+    def _sleep_beating(self, seconds: float) -> None:
+        """Sleep, but never so long that the heartbeat goes quiet."""
+        while seconds > 0:
+            step = min(seconds, HEARTBEAT_INTERVAL)
+            self._sleep(step)
+            seconds -= step
+            self._heartbeat(self._clock())
 
     def serve(self, until: float | None = None) -> int:
         """Serve queued Requests until none are left, or until the clock reaches `until`. Returns Calls made."""
@@ -130,9 +172,9 @@ class RequestEngine:
             if slots <= 0:
                 wait = (starts[0] + WINDOW_SECONDS - now) if len(starts) >= self._per_minute else _BLOCKED_BY_OTHERS_RETRY
                 if until is not None and now + wait > until:
-                    self._sleep(until - now)
+                    self._sleep_beating(until - now)
                     return made
-                self._sleep(wait)
+                self._sleep_beating(wait)
                 continue
             batch = pending[:slots]
             self._serve_batch(batch, now)
@@ -141,9 +183,9 @@ class RequestEngine:
     def _wait(self, seconds: float, now: float, until: float | None) -> bool:
         """Sleep `seconds` (at most until `until`); True when `until` was reached and serving should stop."""
         if until is not None and now + seconds > until:
-            self._sleep(max(until - now, 0))
+            self._sleep_beating(max(until - now, 0))
             return True
-        self._sleep(seconds)
+        self._sleep_beating(seconds)
         return False
 
     def _serve_batch(self, batch: list, now: float) -> None:
@@ -221,5 +263,8 @@ class RequestEngine:
                          {"why": f"Massive answered HTTP {status} for request {request_id}: {error}"})
 
     def _heartbeat(self, now: float) -> None:
+        if self._last_beat is not None and 0 <= now - self._last_beat < HEARTBEAT_INTERVAL:
+            return
+        self._last_beat = now
         with self._db.begin() as conn:
             conn.execute(text("UPDATE request_engine_state SET heartbeat_at = :now WHERE id = 1"), {"now": now})
