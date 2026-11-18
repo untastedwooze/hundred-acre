@@ -135,7 +135,7 @@ def _engine_source(engine: Engine) -> MarketDataSource:
 
 
 def _request_engine_run(args: argparse.Namespace, engine: Engine | None, request_engine) -> int:
-    from hundred_acre.market.request_engine import RequestEngine, resume
+    from hundred_acre.market.request_engine import PRUNE_INTERVAL, RequestEngine, resume
 
     if args.request_engine_command == "resume":
         resume(engine or create_engine(market_database_url()))
@@ -149,8 +149,13 @@ def _request_engine_run(args: argparse.Namespace, engine: Engine | None, request
         return 1
     if args.once:
         request_engine.serve()
+        request_engine.prune_responses()
         return 0
+    last_prune = float("-inf")
     while True:
+        if time.time() - last_prune >= PRUNE_INTERVAL:
+            request_engine.prune_responses()
+            last_prune = time.time()
         request_engine.serve(until=time.time() + IDLE_POLL_SECONDS)
         time.sleep(IDLE_POLL_SECONDS)
 
