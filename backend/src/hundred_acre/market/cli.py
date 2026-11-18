@@ -13,7 +13,7 @@ from hundred_acre.market.delistings import sync_delistings
 from hundred_acre.market.jobs import nightly_daily_bars, nightly_intraday_bars
 from hundred_acre.market.lake import Lake
 from hundred_acre.market.statistics import refresh_statistics
-from hundred_acre.market.priority import PriorityClass
+from hundred_acre.market.priority import PriorityClass, at_priority
 from hundred_acre.market.reference import security_on, sync_reference
 from hundred_acre.market.source import MarketDataSource, MarketDataUnavailable
 from hundred_acre.market.watchlist import add_to_watchlist, remove_from_watchlist, watchlist
@@ -93,7 +93,7 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
             for security_id in sorted(with_actions & set(result.security_ids.values())):
                 rebuild_adjustment_factors(engine, lake, security_id)
             sync_delistings(engine, lake)
-            watchlist_source = _at(source, PriorityClass.NIGHTLY_WATCHLIST)
+            watchlist_source = at_priority(source, PriorityClass.NIGHTLY_WATCHLIST)
             nightly_intraday_bars(watchlist_source, args.as_of, engine=engine, lake=lake)
             print(f"loaded watchlist intraday bars for {args.as_of}")
             refresh_statistics(lake)  # incremental: only Securities whose Bars or factors changed
@@ -116,11 +116,6 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
         print(f"market: {exc}", file=sys.stderr)
         return 1
     return 0
-
-
-def _at(source: MarketDataSource, priority: PriorityClass) -> MarketDataSource:
-    """`source` at another Priority Class, if it has Priority Classes (the in-memory fake does not)."""
-    return source.with_priority(priority) if hasattr(source, "with_priority") else source
 
 
 def _engine_source(engine: Engine) -> MarketDataSource:

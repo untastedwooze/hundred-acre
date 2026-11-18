@@ -64,35 +64,44 @@ def enqueue_as_waiter(
 
     An identical Request that is queued or in progress is joined instead of duplicated, and an abandoned one is
     revived (queued, or in progress from its stored cursor). The Request runs at the highest Priority Class among
-    its waiters. With `wait=False` nothing is joined or registered: a plain new Request that, having never had a
-    waiter, is never abandoned.
+    its live waiters. With `wait=False` no waiter is registered: the Request is pinned at that Priority Class and is
+    never abandoned. At most one non-terminal Request exists per identity (a unique index), so a plain enqueue joins too.
     """
     key = identity_key(path, params)
     with engine.begin() as conn:
         conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": key})
-        row = conn.execute(text(
-            "SELECT id, priority, state, next_cursor FROM requests "
-            "WHERE identity_key = :k AND state IN ('queued', 'in_progress', 'abandoned') AND :wait "
-            "ORDER BY id LIMIT 1"),
-            {"k": key, "wait": wait}).one_or_none()
-        if row is None:
-            request_id = conn.execute(
-                text(
-                    "INSERT INTO requests (path, params, identity_key, requester, created_at, priority) "
-                    "VALUES (:path, CAST(:params AS jsonb), :key, :requester, :now, :priority) RETURNING id"
-                ),
-                {"path": path, "params": json.dumps(params), "key": key,
-                 "requester": requester, "now": now, "priority": str(priority)},
-            ).scalar_one()
-        else:
-            request_id = row.id
+        while True:
+            row = conn.execute(text(
+                "SELECT id, priority, state, next_cursor FROM requests "
+                "WHERE identity_key = :k AND state IN ('queued', 'in_progress', 'abandoned') "
+                "ORDER BY id LIMIT 1"), {"k": key}).one_or_none()
+            if row is None:
+                request_id = conn.execute(
+                    text(
+                        "INSERT INTO requests (path, params, identity_key, requester, created_at, priority, pinned_priority) "
+                        "VALUES (:path, CAST(:params AS jsonb), :key, :requester, :now, :priority, :pinned) RETURNING id"
+                    ),
+                    {"path": path, "params": json.dumps(params), "key": key, "requester": requester, "now": now,
+                     "priority": str(priority), "pinned": None if wait else str(priority)},
+                ).scalar_one()
+                break
             best = min(PriorityClass(row.priority), priority, key=PRIORITY_ORDER.index)
             state = row.state
             if state == "abandoned":
                 state = "in_progress" if row.next_cursor else "queued"
                 best = priority  # the old waiters are gone; only the reviver's urgency counts
-            conn.execute(text("UPDATE requests SET priority = :p, state = :s, retry_at = NULL WHERE id = :r"),
-                         {"p": str(best), "s": state, "r": request_id})
+            # Guarded: an engine completion that landed since the read must not be resurrected.
+            joined = conn.execute(text(
+                "UPDATE requests SET priority = :p, state = :s, retry_at = NULL, "
+                "pinned_priority = CASE WHEN :pin THEN "
+                "  (SELECT p FROM unnest(ARRAY[pinned_priority, CAST(:mine AS text)]) AS p WHERE p IS NOT NULL "
+                "   ORDER BY array_position(CAST(:order AS text[]), p) LIMIT 1) ELSE pinned_priority END "
+                "WHERE id = :r AND state IN ('queued', 'in_progress', 'abandoned')"),
+                {"p": str(best), "s": state, "r": row.id, "pin": not wait, "mine": str(priority),
+                 "order": [str(p) for p in PRIORITY_ORDER]}).rowcount
+            if joined:
+                request_id = row.id
+                break
         waiter_id = None
         if wait:
             waiter_id = conn.execute(text(
@@ -117,8 +126,9 @@ def renew_leases(engine: Engine, waiter_ids: list[int], now: float) -> None:
 
 
 def release_waiters(engine: Engine, waiter_ids: list[int]) -> None:
+    """A waiter gives up: its lease expires now. The row stays, so the engine sees a Request that lost all its waiters."""
     with engine.begin() as conn:
-        conn.execute(text("DELETE FROM request_waiters WHERE id = ANY(:ids)"), {"ids": waiter_ids})
+        conn.execute(text("UPDATE request_waiters SET lease_expires_at = 0 WHERE id = ANY(:ids)"), {"ids": waiter_ids})
 
 
 def wait_for_notification(engine: Engine, timeout: float) -> None:
@@ -130,6 +140,11 @@ def wait_for_notification(engine: Engine, timeout: float) -> None:
         conn.execute(f"LISTEN {NOTIFY_CHANNEL}")
         for _ in conn.notifies(timeout=timeout, stop_after=1):
             break
+        conn.execute("UNLISTEN *")
+        conn.autocommit = False
+    except BaseException:
+        raw.invalidate()  # its state is unknown: do not hand it back to the pool
+        raise
     finally:
         raw.close()
 
@@ -165,10 +180,6 @@ class RequestEngine:
         self._clock, self._sleep = clock, sleep
         self._lock_conn = None
         self._last_beat: float | None = None
-        with self._db.begin() as conn:  # Calls left in flight by a dead predecessor will never finish
-            conn.execute(text(
-                "UPDATE calls SET duration = 0, http_status = 0 WHERE duration IS NULL"))
-        self._heartbeat(self._clock())
 
     def __repr__(self) -> str:
         return "RequestEngine()"
@@ -193,6 +204,13 @@ class RequestEngine:
             conn.close()
             raise EngineAlreadyRunning("a Request Engine is already running against this database")
         self._lock_conn = conn
+        self.start()
+
+    def start(self) -> None:
+        """Take over from a dead predecessor. Only the lock holder may call this: it writes to shared state."""
+        with self._db.begin() as conn:  # Calls left in flight by a dead predecessor will never finish
+            conn.execute(text("UPDATE calls SET duration = 0, http_status = 0 WHERE duration IS NULL"))
+        self._heartbeat(self._clock())
 
     def release_lock(self) -> None:
         if self._lock_conn is not None:
@@ -255,13 +273,25 @@ class RequestEngine:
             made += len(batch)
 
     def _abandon_unwanted(self, now: float) -> None:
-        """Mark abandoned every unfinished Request whose waiters have all let their leases lapse."""
+        """Abandon unfinished Requests whose waiters all let their leases lapse (and that nothing pins), and set every
+        other unfinished Request to the highest Priority Class among its live waiters and its pin."""
+        order = [str(p) for p in PRIORITY_ORDER]
         with self._db.begin() as conn:
             conn.execute(text(
                 "UPDATE requests r SET state = 'abandoned' WHERE r.state IN ('queued', 'in_progress') "
+                "AND r.pinned_priority IS NULL "
                 "AND EXISTS (SELECT 1 FROM request_waiters w WHERE w.request_id = r.id) "
                 "AND NOT EXISTS (SELECT 1 FROM request_waiters w WHERE w.request_id = r.id AND w.lease_expires_at > :now)"),
                 {"now": now})
+            conn.execute(text(
+                "UPDATE requests r SET priority = best.p FROM ("
+                "  SELECT q.id, (SELECT c FROM ("
+                "      SELECT w.priority AS c FROM request_waiters w WHERE w.request_id = q.id AND w.lease_expires_at > :now"
+                "      UNION ALL SELECT q.pinned_priority WHERE q.pinned_priority IS NOT NULL) x"
+                "    ORDER BY array_position(CAST(:order AS text[]), c) LIMIT 1) AS p"
+                "  FROM requests q WHERE q.state IN ('queued', 'in_progress')) best "
+                "WHERE r.id = best.id AND best.p IS NOT NULL AND r.priority <> best.p"),
+                {"now": now, "order": order})
 
     def _wait(self, seconds: float, now: float, until: float | None) -> bool:
         """Sleep `seconds` (at most until `until`); True when `until` was reached and serving should stop."""
@@ -291,6 +321,8 @@ class RequestEngine:
                 return self._massive.call(r.path, params), None, None, self._clock() - began
             except MarketDataUnavailable as exc:
                 return None, str(exc), getattr(exc, "status", None), self._clock() - began
+            except Exception as exc:  # e.g. a 200 with a body that is not JSON: a failed attempt, never an engine crash
+                return None, f"{type(exc).__name__}: {exc}", None, self._clock() - began
 
         if len(batch) == 1:
             results = [one(batch[0])]
@@ -304,12 +336,14 @@ class RequestEngine:
     def _record(self, request_id, call_id, page, result, error, status, duration) -> None:
         body_path = size = None
         if result is not None:
-            raw = json.dumps(result.body).encode()
-            size = len(raw)
-            file = response_file(self._dir, request_id, page)
-            file.parent.mkdir(parents=True, exist_ok=True)
-            file.write_bytes(gzip.compress(raw))
-            body_path = str(file.relative_to(self._dir))
+            try:
+                raw = json.dumps(result.body).encode()
+                file = response_file(self._dir, request_id, page)
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_bytes(gzip.compress(raw))
+                body_path, size = str(file.relative_to(self._dir)), len(raw)
+            except (OSError, TypeError, ValueError) as exc:  # e.g. disk full: this attempt failed, the engine lives
+                result, error, status = None, f"could not store the response: {type(exc).__name__}: {exc}", None
         with self._db.begin() as conn:
             conn.execute(text(
                 "UPDATE calls SET duration = :d, http_status = :s, response_bytes = :size, body_path = :p WHERE id = :id"),
