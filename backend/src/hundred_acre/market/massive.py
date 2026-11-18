@@ -26,6 +26,10 @@ Transport = Callable[[str, dict, dict], dict]  # (path, params, headers) -> pars
 class MassiveError(Exception):
     """A failed Massive request."""
 
+    def __init__(self, message: str = "", status: int | None = None):
+        super().__init__(message)
+        self.status = status  # HTTP status, when Massive answered
+
 
 def _http_transport(path: str, params: dict, headers: dict) -> dict:
     url = BASE_URL + path + ("?" + urllib.parse.urlencode(params) if params else "")
@@ -34,7 +38,7 @@ def _http_transport(path: str, params: dict, headers: dict) -> dict:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.load(resp)
     except urllib.error.HTTPError as exc:
-        raise MassiveError(f"HTTP {exc.code} from Massive {path}") from None
+        raise MassiveError(f"HTTP {exc.code} from Massive {path}", exc.code) from None
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise MassiveError(f"Massive unreachable for {path}: {type(exc).__name__}") from None
 
@@ -127,6 +131,54 @@ def parse_market_holidays(pages: Pages) -> list[MarketHoliday]:
     return [MarketHoliday(_date(r["date"]), r.get("exchange", ""), r.get("name", ""), r.get("status", "")) for r in rows]
 
 
+def _flag(value: bool) -> str:
+    return str(value).lower()
+
+
+def grouped_daily_request(day: date, *, adjusted: bool, include_otc: bool) -> tuple[str, dict]:
+    return (f"/v2/aggs/grouped/locale/us/market/stocks/{day.isoformat()}",
+            {"adjusted": _flag(adjusted), "include_otc": _flag(include_otc)})
+
+
+def aggregates_request(ticker: str, start: date, end: date, *, adjusted: bool) -> tuple[str, dict]:
+    return (f"/v2/aggs/ticker/{urllib.parse.quote(ticker)}/range/1/day/{start.isoformat()}/{end.isoformat()}",
+            {"adjusted": _flag(adjusted), "sort": "asc", "limit": 50000})
+
+
+def intraday_requests(ticker: str, start: date, end: date, *, adjusted: bool) -> list[tuple[str, dict]]:
+    """Five-minute Bars; ranges are split so each Request stays under Massive's 50000-result limit."""
+    out: list[tuple[str, dict]] = []
+    chunk_start = start
+    while chunk_start <= end:
+        chunk_end = min(chunk_start + timedelta(days=_INTRADAY_CHUNK_DAYS - 1), end)
+        out.append((
+            f"/v2/aggs/ticker/{urllib.parse.quote(ticker)}/range/5/minute/{chunk_start.isoformat()}/{chunk_end.isoformat()}",
+            {"adjusted": _flag(adjusted), "sort": "asc", "limit": 50000},
+        ))
+        chunk_start = chunk_end + timedelta(days=1)
+    return out
+
+
+def tickers_request(*, active: bool) -> tuple[str, dict]:
+    return "/v3/reference/tickers", {"active": _flag(active), "limit": 1000}
+
+
+def ticker_events_request(ticker: str) -> tuple[str, dict]:
+    return f"/vX/reference/tickers/{urllib.parse.quote(ticker)}/events", {}
+
+
+def splits_request(since: date) -> tuple[str, dict]:
+    return "/v3/reference/splits", {"execution_date.gte": since.isoformat(), "limit": 1000}
+
+
+def dividends_request(since: date) -> tuple[str, dict]:
+    return "/v3/reference/dividends", {"ex_dividend_date.gte": since.isoformat(), "limit": 1000}
+
+
+def market_holidays_request() -> tuple[str, dict]:
+    return "/v1/marketstatus/upcoming", {}
+
+
 class MassiveSource:
     def __init__(self, api_key: str, *, transport: Transport = _http_transport):
         self._api_key = api_key
@@ -148,7 +200,9 @@ class MassiveSource:
         try:
             body = self._transport(path, params or {}, headers)
         except MassiveError as exc:
-            raise MarketDataUnavailable(str(exc).replace(self._api_key, "***")) from None
+            unavailable = MarketDataUnavailable(str(exc).replace(self._api_key, "***"))
+            unavailable.status = exc.status  # type: ignore[attr-defined]
+            raise unavailable from None
         return Page(body, body.get("next_cursor") if isinstance(body, dict) else None)
 
     def _get(self, path: str, params: dict | None = None) -> dict:
@@ -165,51 +219,31 @@ class MassiveSource:
             params["cursor"] = page.next_cursor
 
     def grouped_daily(self, day: date, *, adjusted: bool, include_otc: bool) -> list[BarData]:
-        body = self._get(
-            f"/v2/aggs/grouped/locale/us/market/stocks/{day.isoformat()}",
-            {"adjusted": str(adjusted).lower(), "include_otc": str(include_otc).lower()},
-        )
-        return parse_bars([body])
+        return parse_bars([self._get(*grouped_daily_request(day, adjusted=adjusted, include_otc=include_otc))])
 
     def aggregates(self, ticker: str, start: date, end: date, *, adjusted: bool) -> list[tuple[date, BarData]]:
-        body = self._get(
-            f"/v2/aggs/ticker/{urllib.parse.quote(ticker)}/range/1/day/{start.isoformat()}/{end.isoformat()}",
-            {"adjusted": str(adjusted).lower(), "sort": "asc", "limit": 50000},
-        )
-        return parse_aggregates([body], ticker)
+        return parse_aggregates([self._get(*aggregates_request(ticker, start, end, adjusted=adjusted))], ticker)
 
     def intraday_aggregates(
         self, ticker: str, start: date, end: date, *, adjusted: bool
     ) -> list[tuple[datetime, BarData]]:
-        """Five-minute Bars; ranges are split so each request stays under Massive's 50000-result limit."""
-        pages: Pages = []
-        chunk_start = start
-        while chunk_start <= end:
-            chunk_end = min(chunk_start + timedelta(days=_INTRADAY_CHUNK_DAYS - 1), end)
-            pages.append(self._get(
-                f"/v2/aggs/ticker/{urllib.parse.quote(ticker)}/range/5/minute/"
-                f"{chunk_start.isoformat()}/{chunk_end.isoformat()}",
-                {"adjusted": str(adjusted).lower(), "sort": "asc", "limit": 50000},
-            ))
-            chunk_start = chunk_end + timedelta(days=1)
+        pages = [self._get(path, params) for path, params in intraday_requests(ticker, start, end, adjusted=adjusted)]
         return parse_intraday_aggregates(pages, ticker)
 
     def tickers(self) -> list[TickerRecord]:
         out: list[TickerRecord] = []
         for active in (True, False):
-            pages = self._paged("/v3/reference/tickers", {"active": str(active).lower(), "limit": 1000})
-            out.extend(parse_tickers(pages, active=active))
+            out.extend(parse_tickers(self._paged(*tickers_request(active=active)), active=active))
         return out
 
     def ticker_events(self, ticker: str) -> list[TickerEvent]:
-        return parse_ticker_events([self._get(f"/vX/reference/tickers/{urllib.parse.quote(ticker)}/events")], ticker)
+        return parse_ticker_events([self._get(*ticker_events_request(ticker))], ticker)
 
     def splits(self, since: date) -> list[Split]:
-        return parse_splits(self._paged("/v3/reference/splits", {"execution_date.gte": since.isoformat(), "limit": 1000}))
+        return parse_splits(self._paged(*splits_request(since)))
 
     def dividends(self, since: date) -> list[Dividend]:
-        return parse_dividends(
-            self._paged("/v3/reference/dividends", {"ex_dividend_date.gte": since.isoformat(), "limit": 1000}))
+        return parse_dividends(self._paged(*dividends_request(since)))
 
     def upcoming_market_holidays(self) -> list[MarketHoliday]:
-        return parse_market_holidays([self._get("/v1/marketstatus/upcoming")])
+        return parse_market_holidays([self._get(*market_holidays_request())])
