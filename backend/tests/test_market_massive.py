@@ -60,3 +60,48 @@ def test_missing_key_is_a_clear_error(monkeypatch):
     monkeypatch.delenv("MASSIVE_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="MASSIVE_API_KEY"):
         MassiveSource.from_env()
+
+
+def test_call_makes_exactly_one_call_and_returns_body_and_next_cursor():
+    t = FakeTransport({"/v3/reference/splits": [
+        {"results": [{"ticker": "A"}], "next_cursor": "c2"}, {"results": []}]})
+    page = MassiveSource(KEY, transport=t).call("/v3/reference/splits", {"limit": 1000})
+    assert len(t.calls) == 1
+    assert page.body == {"results": [{"ticker": "A"}], "next_cursor": "c2"}
+    assert page.next_cursor == "c2"
+    last = MassiveSource(KEY, transport=FakeTransport({"/p": {"results": []}})).call("/p")
+    assert last.next_cursor is None
+
+
+def test_call_redacts_api_key_in_errors():
+    t = FakeTransport({"/p": MassiveError(f"boom {KEY}")})
+    with pytest.raises(MarketDataUnavailable) as e:
+        MassiveSource(KEY, transport=t).call("/p")
+    assert KEY not in str(e.value)
+
+
+def test_parsing_works_on_raw_pages_without_http():
+    from hundred_acre.market import massive as m
+
+    bar = {"o": 1, "h": 2, "l": 1, "c": 2, "v": 3}
+    assert m.parse_bars([{"results": [{"T": "AAPL", **bar}]}]) == [BarData("AAPL", 1, 2, 1, 2, 3, None, None)]
+    daily = m.parse_aggregates(
+        [{"results": [{"t": 1700000000000, **bar}]}, {"results": [{"t": 1700086400000, **bar}]}], "X")
+    assert [d for d, _ in daily] == [date(2023, 11, 14), date(2023, 11, 15)]
+    assert daily[0][1].ticker == "X"
+    intra = m.parse_intraday_aggregates([{"results": [{"t": 1700000000000, **bar}]}], "X")
+    assert intra[0][0].isoformat() == "2023-11-14T22:13:20+00:00"
+    recs = m.parse_tickers([{"results": [{"ticker": "A", "active": True}]}], active=True)
+    assert recs[0].ticker == "A" and recs[0].active is True
+    ev = m.parse_ticker_events([{"results": {"events": [
+        {"date": "2020-01-02", "type": "ticker_change", "ticker_change": {"ticker": "B"}}]}}], "A")
+    assert ev[0].ticker == "A" and ev[0].date == date(2020, 1, 2)
+    sp = m.parse_splits([{"results": [
+        {"ticker": "A", "execution_date": "2020-01-02", "split_from": 1, "split_to": 2, "id": "s"}]}])
+    assert sp[0].split_to == 2
+    dv = m.parse_dividends([{"results": [{"ticker": "A", "ex_dividend_date": "2020-01-02", "cash_amount": 0.5}]}])
+    assert dv[0].cash_amount == 0.5
+    hol = m.parse_market_holidays([{"results": [
+        {"date": "2026-12-25", "exchange": "NYSE", "name": "Xmas", "status": "closed"}]}])
+    assert hol[0].name == "Xmas"
+    assert m.parse_market_holidays([[{"date": "2026-12-25"}]])[0].date == date(2026, 12, 25)
