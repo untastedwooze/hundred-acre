@@ -196,7 +196,7 @@ class RequestEngine:
                              {"c": result.next_cursor, "r": request_id})
             else:
                 conn.execute(text(
-                    "UPDATE requests SET state = 'complete', next_cursor = NULL, finished_at = :now WHERE id = :r"),
+                    "UPDATE requests SET state = 'complete', next_cursor = NULL, last_error = NULL, last_status = NULL, finished_at = :now WHERE id = :r"),
                     {"now": self._clock(), "r": request_id})
 
     def _record_failure(self, conn, request_id: int, error: str | None, status: int | None) -> None:
