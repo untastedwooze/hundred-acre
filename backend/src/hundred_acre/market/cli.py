@@ -31,6 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--as-of", type=date.fromisoformat, required=True, help="as-of trading date, YYYY-MM-DD")
     re_ = sub.add_parser("request-engine", help="the Request Engine, the only process that calls Massive")
     re_sub = re_.add_subparsers(dest="request_engine_command", required=True)
+    re_sub.add_parser("status", help="show engine state, queue depth, Call usage and recent failures (database only)")
     re_sub.add_parser("resume", help="clear a halt (after fixing the API key or plan); queued Requests then continue")
     run = re_sub.add_parser("run", help="serve queued Requests (configured by environment variables)")
     run.add_argument("--once", action="store_true", help="serve until the queue is empty, then exit")
@@ -52,14 +53,14 @@ def _job_priority(job: str) -> Priority:
 
 
 def main(argv: list[str] | None = None, *, source: MarketDataSource | None = None,
-         engine: Engine | None = None, lake: Lake | None = None, request_engine=None) -> int:
+         engine: Engine | None = None, lake: Lake | None = None, request_engine=None, clock=time.time) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "migrate":
         migrate()
         return 0
 
     if args.command == "request-engine":
-        return _request_engine_run(args, engine, request_engine)
+        return _request_engine_run(args, engine, request_engine, clock)
 
     if args.command == "watchlist" and args.watchlist_command in ("list", "remove"):
         return _watchlist_offline(args, engine)
@@ -115,9 +116,14 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
     return 0
 
 
-def _request_engine_run(args: argparse.Namespace, engine: Engine | None, request_engine) -> int:
+def _request_engine_run(args: argparse.Namespace, engine: Engine | None, request_engine, clock=time.time) -> int:
     from hundred_acre.market.request_engine import RequestEngine, resume
 
+    if args.request_engine_command == "status":
+        from hundred_acre.market.request_engine_status import render_status
+
+        print(render_status(engine or create_engine(market_database_url()), clock()))
+        return 0
     if args.request_engine_command == "resume":
         resume(engine or create_engine(market_database_url()))
         return 0
