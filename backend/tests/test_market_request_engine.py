@@ -433,6 +433,107 @@ def test_a_403_halts_too(world, market_engine):
         assert conn.execute(text("SELECT state FROM request_engine_state")).scalar() == "halted"
 
 
+# --- waiters, coalescing and abandonment ---
+
+def _wait_for(w, path, priority=None, params=None):
+    from hundred_acre.market.priority import PriorityClass as P
+    from hundred_acre.market.request_engine import enqueue_as_waiter
+    return enqueue_as_waiter(w.db, path, params or {}, requester="t", now=w.clock(), priority=priority or P.INTERACTIVE)
+
+
+def test_identical_simultaneous_requests_cause_one_set_of_calls_and_both_get_the_answer(world):
+    from hundred_acre.market.request_engine import read_pages
+    w = world({"/q": {"results": [1]}})
+    (a, _), (b, _) = _wait_for(w, "/q"), _wait_for(w, "/q")
+    assert a == b
+    w.engine.serve()
+    assert len(w.transport.calls) == 1
+    assert read_pages(w.db, w.dir, a) == [{"results": [1]}]
+
+
+def test_a_backfill_request_joined_by_a_nightly_waiter_is_served_at_nightly_priority(world):
+    from hundred_acre.market.priority import PriorityClass as P
+    w = world({"/shared": {"results": []}, "/other": {"results": []}}, per_minute=100)
+    _wait_for(w, "/shared", P.BACKFILL)
+    _wait_for(w, "/other", P.NIGHTLY_DAILY)
+    _wait_for(w, "/shared", P.NIGHTLY_WATCHLIST)
+    w.engine.serve()
+    assert [c[1] for c in w.transport.calls] == ["/shared", "/other"]
+    with w.db.connect() as conn:
+        assert conn.execute(text("SELECT priority FROM requests WHERE path = '/shared'")).scalar() == "nightly_watchlist"
+
+
+def test_asking_again_after_completion_makes_new_calls(world):
+    w = world({"/q": {"results": []}})
+    first, _ = _wait_for(w, "/q")
+    w.engine.serve()
+    second, _ = _wait_for(w, "/q")
+    w.engine.serve()
+    assert first != second and len(w.transport.calls) == 2
+
+
+PAGES3 = [{"results": [], "next_cursor": "c2"}, {"results": [], "next_cursor": "c3"}, {"results": []}]
+
+
+def test_a_request_whose_waiter_stops_renewing_is_abandoned_before_its_next_call(world):
+    w = world({"/p": PAGES3}, per_minute=1)
+    rid, _ = _wait_for(w, "/p")
+    w.engine.serve(until=w.clock() + 1)  # page one
+    w.clock.now += 61  # the lease lapses
+    w.engine.serve()
+    assert len(w.transport.calls) == 1
+    assert _state(w.db, rid)[0] == "abandoned"
+
+
+def test_an_identical_request_after_abandonment_resumes_from_the_stored_cursor(world):
+    w = world({"/p": PAGES3}, per_minute=1)
+    rid, _ = _wait_for(w, "/p")
+    w.engine.serve(until=w.clock() + 1)
+    w.clock.now += 61
+    w.engine.serve()
+    again, wid = _wait_for(w, "/p")
+    assert again == rid
+    from hundred_acre.market.request_engine import renew_leases
+
+    def sleep_and_renew(seconds):  # the live caller keeps renewing while the rate limit makes it wait
+        w.clock.sleep(seconds)
+        renew_leases(w.db, [wid], w.clock())
+
+    w.engine._sleep = sleep_and_renew
+    w.engine.serve()
+    assert _state(w.db, rid)[0] == "complete"
+    assert [c[2].get("cursor") for c in w.transport.calls] == [None, "c2", "c3"]
+
+
+def test_renewed_leases_keep_a_request_alive(world):
+    from hundred_acre.market.request_engine import renew_leases
+    w = world({"/q": {"results": []}})
+    rid, wid = _wait_for(w, "/q")
+    w.clock.now += 50
+    renew_leases(w.db, [wid], w.clock())
+    w.clock.now += 50
+    w.engine.serve()
+    assert _state(w.db, rid)[0] == "complete"
+
+
+def test_a_waiter_is_woken_by_notification_well_before_its_timeout(world, market_engine):
+    from hundred_acre.market.request_engine import wait_for_notification
+    w = world({"/q": {"results": []}})
+    _wait_for(w, "/q")
+    timer = threading.Timer(0.5, w.engine.serve)
+    timer.start()
+    began = time.monotonic()
+    wait_for_notification(market_engine, 20)
+    timer.join()
+    assert time.monotonic() - began < 10
+
+
+def test_polling_alone_completes_a_wait_when_notifications_are_lost(world):
+    w = world({GROUPED: {"results": [BAR]}})  # World's source waits by sleeping and polling: no notification used
+    bars = w.source.grouped_daily(date(2026, 11, 13), adjusted=False, include_otc=False)
+    assert bars[0].ticker == "AAPL"
+
+
 def test_response_bodies_older_than_90_days_are_pruned_but_call_rows_stay(world):
     w = world({GROUPED: {"results": [BAR]}})
     w.source.grouped_daily(date(2026, 11, 13), adjusted=False, include_otc=False)

@@ -51,20 +51,87 @@ def identity_key(path: str, params: dict) -> str:
     return hashlib.sha256(json.dumps([path, params], sort_keys=True).encode()).hexdigest()
 
 
+LEASE_SECONDS = 60.0  # a waiter's lease; it must be renewed before it lapses
+LEASE_RENEW_INTERVAL = 30.0
+NOTIFY_CHANNEL = "request_done"
+
+
+def enqueue_as_waiter(
+    engine: Engine, path: str, params: dict, *, requester: str, now: float,
+    priority: PriorityClass = PriorityClass.INTERACTIVE, wait: bool = True,
+) -> tuple[int, int | None]:
+    """Ask for a Request; returns (request id, waiter id).
+
+    An identical Request that is queued or in progress is joined instead of duplicated, and an abandoned one is
+    revived (queued, or in progress from its stored cursor). The Request runs at the highest Priority Class among
+    its waiters. With `wait=False` nothing is joined or registered: a plain new Request that, having never had a
+    waiter, is never abandoned.
+    """
+    key = identity_key(path, params)
+    with engine.begin() as conn:
+        conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": key})
+        row = conn.execute(text(
+            "SELECT id, priority, state, next_cursor FROM requests "
+            "WHERE identity_key = :k AND state IN ('queued', 'in_progress', 'abandoned') AND :wait "
+            "ORDER BY id LIMIT 1"),
+            {"k": key, "wait": wait}).one_or_none()
+        if row is None:
+            request_id = conn.execute(
+                text(
+                    "INSERT INTO requests (path, params, identity_key, requester, created_at, priority) "
+                    "VALUES (:path, CAST(:params AS jsonb), :key, :requester, :now, :priority) RETURNING id"
+                ),
+                {"path": path, "params": json.dumps(params), "key": key,
+                 "requester": requester, "now": now, "priority": str(priority)},
+            ).scalar_one()
+        else:
+            request_id = row.id
+            best = min(PriorityClass(row.priority), priority, key=PRIORITY_ORDER.index)
+            state = row.state
+            if state == "abandoned":
+                state = "in_progress" if row.next_cursor else "queued"
+                best = priority  # the old waiters are gone; only the reviver's urgency counts
+            conn.execute(text("UPDATE requests SET priority = :p, state = :s, retry_at = NULL WHERE id = :r"),
+                         {"p": str(best), "s": state, "r": request_id})
+        waiter_id = None
+        if wait:
+            waiter_id = conn.execute(text(
+                "INSERT INTO request_waiters (request_id, priority, lease_expires_at) "
+                "VALUES (:r, :p, :exp) RETURNING id"),
+                {"r": request_id, "p": str(priority), "exp": now + LEASE_SECONDS}).scalar_one()
+        return request_id, waiter_id
+
+
 def enqueue(
     engine: Engine, path: str, params: dict, *, requester: str, now: float,
-    priority: PriorityClass = PriorityClass.INTERACTIVE,
+    priority: PriorityClass = PriorityClass.INTERACTIVE, wait: bool = False,
 ) -> int:
-    """Put one Request on the queue at a Priority Class and return its id."""
+    """Put one Request on the queue at a Priority Class (joining an identical pending one) and return its id."""
+    return enqueue_as_waiter(engine, path, params, requester=requester, now=now, priority=priority, wait=wait)[0]
+
+
+def renew_leases(engine: Engine, waiter_ids: list[int], now: float) -> None:
     with engine.begin() as conn:
-        return conn.execute(
-            text(
-                "INSERT INTO requests (path, params, identity_key, requester, created_at, priority) "
-                "VALUES (:path, CAST(:params AS jsonb), :key, :requester, :now, :priority) RETURNING id"
-            ),
-            {"path": path, "params": json.dumps(params), "key": identity_key(path, params),
-             "requester": requester, "now": now, "priority": str(priority)},
-        ).scalar_one()
+        conn.execute(text("UPDATE request_waiters SET lease_expires_at = :e WHERE id = ANY(:ids)"),
+                     {"e": now + LEASE_SECONDS, "ids": waiter_ids})
+
+
+def release_waiters(engine: Engine, waiter_ids: list[int]) -> None:
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM request_waiters WHERE id = ANY(:ids)"), {"ids": waiter_ids})
+
+
+def wait_for_notification(engine: Engine, timeout: float) -> None:
+    """Block until a Request finishes (Postgres NOTIFY) or `timeout` seconds pass, whichever is first."""
+    raw = engine.raw_connection()
+    try:
+        conn = raw.driver_connection
+        conn.autocommit = True
+        conn.execute(f"LISTEN {NOTIFY_CHANNEL}")
+        for _ in conn.notifies(timeout=timeout, stop_after=1):
+            break
+    finally:
+        raw.close()
 
 
 def resume(engine: Engine) -> None:
@@ -149,6 +216,7 @@ class RequestEngine:
             self._heartbeat(now)
             if until is not None and now >= until:
                 return made
+            self._abandon_unwanted(now)
             with self._db.connect() as conn:
                 state = conn.execute(text("SELECT state, paused_until FROM request_engine_state WHERE id = 1")).one()
                 if state.state == "halted":
@@ -185,6 +253,15 @@ class RequestEngine:
             batch = pending[:slots]
             self._serve_batch(batch, now)
             made += len(batch)
+
+    def _abandon_unwanted(self, now: float) -> None:
+        """Mark abandoned every unfinished Request whose waiters have all let their leases lapse."""
+        with self._db.begin() as conn:
+            conn.execute(text(
+                "UPDATE requests r SET state = 'abandoned' WHERE r.state IN ('queued', 'in_progress') "
+                "AND EXISTS (SELECT 1 FROM request_waiters w WHERE w.request_id = r.id) "
+                "AND NOT EXISTS (SELECT 1 FROM request_waiters w WHERE w.request_id = r.id AND w.lease_expires_at > :now)"),
+                {"now": now})
 
     def _wait(self, seconds: float, now: float, until: float | None) -> bool:
         """Sleep `seconds` (at most until `until`); True when `until` was reached and serving should stop."""
@@ -239,6 +316,7 @@ class RequestEngine:
                 {"d": duration, "s": 200 if result is not None else (status or 0), "size": size, "p": body_path, "id": call_id})
             if result is None:
                 self._record_failure(conn, request_id, error, status)
+                conn.execute(text("SELECT pg_notify(:c, :r)"), {"c": NOTIFY_CHANNEL, "r": str(request_id)})
             elif result.next_cursor:
                 conn.execute(text("UPDATE requests SET next_cursor = :c, retry_at = NULL WHERE id = :r"),
                              {"c": result.next_cursor, "r": request_id})
@@ -246,6 +324,7 @@ class RequestEngine:
                 conn.execute(text(
                     "UPDATE requests SET state = 'complete', next_cursor = NULL, last_error = NULL, last_status = NULL, finished_at = :now WHERE id = :r"),
                     {"now": self._clock(), "r": request_id})
+                conn.execute(text("SELECT pg_notify(:c, :r)"), {"c": NOTIFY_CHANNEL, "r": str(request_id)})
 
     def _record_failure(self, conn, request_id: int, error: str | None, status: int | None) -> None:
         now = self._clock()
