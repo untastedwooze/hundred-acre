@@ -25,6 +25,8 @@ WINDOW_SECONDS = 60.0
 HEARTBEAT_INTERVAL = 10.0
 STALE_AFTER = 60.0  # a heartbeat older than this means the engine is not running
 ADVISORY_LOCK_KEY = 0x48554E44  # "HUND": held for as long as a Request Engine runs
+RESPONSE_RETENTION_DAYS = 90
+PRUNE_INTERVAL = 3600.0
 MAX_ATTEMPTS = 5
 BACKOFF_BASE_SECONDS = 1.0  # a Request's nth failed attempt waits base * 2**(n-1) before the next
 RATE_LIMITED_PAUSE_SECONDS = 60.0
@@ -272,3 +274,22 @@ class RequestEngine:
         self._last_beat = now
         with self._db.begin() as conn:
             conn.execute(text("UPDATE request_engine_state SET heartbeat_at = :now WHERE id = 1"), {"now": now})
+
+    def prune_responses(self) -> int:
+        """Delete response bodies older than the retention period and clear their location on the Call rows.
+        Request and Call rows are kept. Returns the number of bodies removed."""
+        cutoff = self._clock() - RESPONSE_RETENTION_DAYS * 86400
+        with self._db.begin() as conn:
+            old = conn.execute(text(
+                "SELECT id, body_path FROM calls WHERE body_path IS NOT NULL AND started_at < :c"), {"c": cutoff}).all()
+            for call in old:
+                (self._dir / call.body_path).unlink(missing_ok=True)
+            if old:
+                conn.execute(text("UPDATE calls SET body_path = NULL WHERE id = ANY(:ids)"),
+                             {"ids": [c.id for c in old]})
+        for d in {(self._dir / c.body_path).parent for c in old}:
+            try:
+                d.rmdir()
+            except OSError:
+                pass
+        return len(old)
