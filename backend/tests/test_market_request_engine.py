@@ -210,3 +210,48 @@ def test_cli_request_engine_run_uses_environment_configuration_only(market_engin
     assert len(transport.calls) == 1
     with market_engine.connect() as conn:
         assert conn.execute(text("SELECT state FROM requests")).scalar() == "complete"
+
+
+def test_requests_are_served_in_priority_class_order_and_fifo_within_a_class(world):
+    from hundred_acre.market.priority import PriorityClass as P
+    from hundred_acre.market.request_engine import enqueue
+    w = world({f"/p/{i}": {"results": []} for i in range(6)}, per_minute=100)
+    queued = [(0, P.BACKFILL), (1, P.NIGHTLY_DAILY), (2, P.INTERACTIVE), (3, P.NIGHTLY_WATCHLIST),
+              (4, P.WEEKLY_UNIVERSE), (5, P.INTERACTIVE)]
+    for i, p in queued:
+        enqueue(w.db, f"/p/{i}", {}, requester="t", now=w.clock(), priority=p)
+    w.engine.serve()
+    assert [c[1] for c in w.transport.calls] == ["/p/2", "/p/5", "/p/3", "/p/1", "/p/4", "/p/0"]
+
+
+def test_a_higher_class_request_gets_in_between_the_pages_of_a_running_lower_one(world):
+    from hundred_acre.market.priority import PriorityClass as P
+    from hundred_acre.market.request_engine import enqueue
+    pages = [{"results": [], "next_cursor": "c2"}, {"results": [], "next_cursor": "c3"}, {"results": []}]
+    w = world({"/v3/reference/splits": pages, "/watch": {"results": []}}, per_minute=1)
+    enqueue(w.db, "/v3/reference/splits", {}, requester="bf", now=w.clock(), priority=P.BACKFILL)
+    w.engine.serve(until=w.clock() + 1)  # the backfill's first page only
+    assert [c[1] for c in w.transport.calls] == ["/v3/reference/splits"]
+    enqueue(w.db, "/watch", {}, requester="nw", now=w.clock(), priority=P.NIGHTLY_WATCHLIST)
+    w.engine.serve()
+    assert [c[1] for c in w.transport.calls] == [
+        "/v3/reference/splits", "/watch", "/v3/reference/splits", "/v3/reference/splits"]
+
+
+def test_priority_class_is_stored_by_name(world, market_engine):
+    from hundred_acre.market.priority import PriorityClass as P
+    from hundred_acre.market.request_engine import enqueue
+    w = world({"/x": {"results": []}})
+    enqueue(w.db, "/x", {}, requester="t", now=w.clock(), priority=P.WEEKLY_UNIVERSE)
+    with market_engine.connect() as conn:
+        assert conn.execute(text("SELECT priority FROM requests")).scalar() == "weekly_universe"
+
+
+def test_engine_source_derives_a_copy_at_another_class_and_its_requests_carry_it(world, market_engine):
+    from hundred_acre.market.priority import PriorityClass as P
+    w = world({GROUPED: {"results": [BAR]}})
+    derived = w.source.with_priority(P.NIGHTLY_WATCHLIST)
+    derived.grouped_daily(date(2026, 11, 13), adjusted=False, include_otc=False)
+    assert derived is not w.source
+    with market_engine.connect() as conn:
+        assert conn.execute(text("SELECT priority FROM requests")).scalar() == "nightly_watchlist"

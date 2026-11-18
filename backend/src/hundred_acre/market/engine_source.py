@@ -4,6 +4,7 @@ Each method enqueues one or more Requests, polls until they are complete, and pa
 same parsing the Massive client uses.
 """
 
+import copy
 import time
 from collections.abc import Callable
 from datetime import date, datetime
@@ -12,6 +13,7 @@ from pathlib import Path
 from sqlalchemy import Engine, text
 
 from hundred_acre.market import massive as m
+from hundred_acre.market.priority import PriorityClass
 from hundred_acre.market.request_engine import enqueue, read_pages
 from hundred_acre.market.source import (
     BarData, Dividend, MarketDataUnavailable, MarketHoliday, Split, TickerEvent, TickerRecord,
@@ -23,18 +25,27 @@ DEFAULT_POLL_INTERVAL = 3.0
 class EngineSource:
     def __init__(
         self, engine: Engine, responses_dir: Path, *, requester: str = "market",
+        priority: PriorityClass = PriorityClass.INTERACTIVE,
         clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
     ):
         self._db, self._dir, self._requester = engine, Path(responses_dir), requester
+        self._priority = priority
         self._clock, self._sleep, self._poll = clock, sleep, poll_interval
 
     def __repr__(self) -> str:
         return "EngineSource()"
 
+    def with_priority(self, priority: PriorityClass) -> "EngineSource":
+        """A copy of this source whose Requests carry another Priority Class."""
+        clone = copy.copy(self)
+        clone._priority = priority
+        return clone
+
     def _fetch(self, requests: list[tuple[str, dict]]) -> list[list]:
         """Enqueue the Requests, wait for all of them, and return each one's stored pages."""
-        ids = [enqueue(self._db, path, params, requester=self._requester, now=self._clock()) for path, params in requests]
+        ids = [enqueue(self._db, path, params, requester=self._requester, now=self._clock(),
+                         priority=self._priority) for path, params in requests]
         while True:
             with self._db.connect() as conn:
                 rows = conn.execute(
