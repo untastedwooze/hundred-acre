@@ -16,6 +16,7 @@ from pathlib import Path
 from sqlalchemy import Engine, text
 
 from hundred_acre.market.massive import MassiveSource
+from hundred_acre.market.priority import PRIORITY_ORDER, PriorityClass
 from hundred_acre.market.source import MarketDataUnavailable
 
 DEFAULT_CALLS_PER_MINUTE = 5
@@ -50,16 +51,19 @@ def identity_key(path: str, params: dict) -> str:
     return hashlib.sha256(json.dumps([path, params], sort_keys=True).encode()).hexdigest()
 
 
-def enqueue(engine: Engine, path: str, params: dict, *, requester: str, now: float) -> int:
-    """Put one Request on the queue and return its id."""
+def enqueue(
+    engine: Engine, path: str, params: dict, *, requester: str, now: float,
+    priority: PriorityClass = PriorityClass.INTERACTIVE,
+) -> int:
+    """Put one Request on the queue at a Priority Class and return its id."""
     with engine.begin() as conn:
         return conn.execute(
             text(
-                "INSERT INTO requests (path, params, identity_key, requester, created_at) "
-                "VALUES (:path, CAST(:params AS jsonb), :key, :requester, :now) RETURNING id"
+                "INSERT INTO requests (path, params, identity_key, requester, created_at, priority) "
+                "VALUES (:path, CAST(:params AS jsonb), :key, :requester, :now, :priority) RETURNING id"
             ),
             {"path": path, "params": json.dumps(params), "key": identity_key(path, params),
-             "requester": requester, "now": now},
+             "requester": requester, "now": now, "priority": str(priority)},
         ).scalar_one()
 
 
@@ -156,8 +160,8 @@ class RequestEngine:
                 pending = conn.execute(text(
                     "SELECT id, path, params, next_cursor FROM requests "
                     "WHERE state IN ('queued', 'in_progress') AND (retry_at IS NULL OR retry_at <= :now) "
-                    "ORDER BY id LIMIT :n"),
-                    {"n": self._max_concurrent, "now": now}).all()
+                    "ORDER BY array_position(CAST(:order AS text[]), priority), id LIMIT :n"),
+                    {"n": self._max_concurrent, "now": now, "order": [str(p) for p in PRIORITY_ORDER]}).all()
                 if not pending:
                     next_retry = conn.execute(text(
                         "SELECT min(retry_at) FROM requests WHERE state IN ('queued', 'in_progress')")).scalar()
