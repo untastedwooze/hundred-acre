@@ -21,6 +21,9 @@ from hundred_acre.market.source import MarketDataUnavailable
 DEFAULT_CALLS_PER_MINUTE = 5
 DEFAULT_MAX_CONCURRENT_CALLS = 1
 WINDOW_SECONDS = 60.0
+MAX_ATTEMPTS = 5
+BACKOFF_BASE_SECONDS = 1.0  # a Request's nth failed attempt waits base * 2**(n-1) before the next
+RATE_LIMITED_PAUSE_SECONDS = 60.0
 _BLOCKED_BY_OTHERS_RETRY = 1.0  # seconds to wait when Calls made elsewhere hold every concurrency slot
 
 
@@ -39,6 +42,12 @@ def enqueue(engine: Engine, path: str, params: dict, *, requester: str, now: flo
             {"path": path, "params": json.dumps(params), "key": identity_key(path, params),
              "requester": requester, "now": now},
         ).scalar_one()
+
+
+def resume(engine: Engine) -> None:
+    """Clear a halt. Needs only the database; queued and in-progress Requests continue when an engine serves."""
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE request_engine_state SET state = 'running', halt_reason = NULL WHERE id = 1"))
 
 
 def response_file(responses_dir: Path, request_id: int, page: int) -> Path:
@@ -93,12 +102,26 @@ class RequestEngine:
             if until is not None and now >= until:
                 return made
             with self._db.connect() as conn:
+                state = conn.execute(text("SELECT state, paused_until FROM request_engine_state WHERE id = 1")).one()
+                if state.state == "halted":
+                    return made
+                if state.paused_until is not None and state.paused_until > now:
+                    if self._wait(state.paused_until - now, now, until):
+                        return made
+                    continue
                 pending = conn.execute(text(
                     "SELECT id, path, params, next_cursor FROM requests "
-                    "WHERE state IN ('queued', 'in_progress') ORDER BY id LIMIT :n"),
-                    {"n": self._max_concurrent}).all()
+                    "WHERE state IN ('queued', 'in_progress') AND (retry_at IS NULL OR retry_at <= :now) "
+                    "ORDER BY id LIMIT :n"),
+                    {"n": self._max_concurrent, "now": now}).all()
                 if not pending:
-                    return made
+                    next_retry = conn.execute(text(
+                        "SELECT min(retry_at) FROM requests WHERE state IN ('queued', 'in_progress')")).scalar()
+                    if next_retry is None:
+                        return made
+                    if self._wait(next_retry - now, now, until):
+                        return made
+                    continue
                 starts = conn.execute(text(
                     "SELECT started_at FROM calls WHERE started_at > :since ORDER BY started_at"),
                     {"since": now - WINDOW_SECONDS}).scalars().all()
@@ -114,6 +137,14 @@ class RequestEngine:
             batch = pending[:slots]
             self._serve_batch(batch, now)
             made += len(batch)
+
+    def _wait(self, seconds: float, now: float, until: float | None) -> bool:
+        """Sleep `seconds` (at most until `until`); True when `until` was reached and serving should stop."""
+        if until is not None and now + seconds > until:
+            self._sleep(max(until - now, 0))
+            return True
+        self._sleep(seconds)
+        return False
 
     def _serve_batch(self, batch: list, now: float) -> None:
         call_ids = {}
@@ -159,16 +190,35 @@ class RequestEngine:
                 "UPDATE calls SET duration = :d, http_status = :s, response_bytes = :size, body_path = :p WHERE id = :id"),
                 {"d": duration, "s": 200 if result is not None else (status or 0), "size": size, "p": body_path, "id": call_id})
             if result is None:
-                conn.execute(text(
-                    "UPDATE requests SET state = 'failed', last_error = :e, last_status = :s, finished_at = :now WHERE id = :r"),
-                    {"e": error, "s": status, "now": self._clock(), "r": request_id})
+                self._record_failure(conn, request_id, error, status)
             elif result.next_cursor:
-                conn.execute(text("UPDATE requests SET next_cursor = :c WHERE id = :r"),
+                conn.execute(text("UPDATE requests SET next_cursor = :c, retry_at = NULL WHERE id = :r"),
                              {"c": result.next_cursor, "r": request_id})
             else:
                 conn.execute(text(
                     "UPDATE requests SET state = 'complete', next_cursor = NULL, finished_at = :now WHERE id = :r"),
                     {"now": self._clock(), "r": request_id})
+
+    def _record_failure(self, conn, request_id: int, error: str | None, status: int | None) -> None:
+        now = self._clock()
+        if status == 429:  # global pause; the Request is retried and this is not an attempt
+            conn.execute(text("UPDATE request_engine_state SET paused_until = :u WHERE id = 1"),
+                         {"u": now + RATE_LIMITED_PAUSE_SECONDS})
+            return
+        if status is None or status >= 500:
+            attempts = conn.execute(text(
+                "UPDATE requests SET attempts = attempts + 1, last_error = :e, last_status = :s WHERE id = :r "
+                "RETURNING attempts"), {"e": error, "s": status, "r": request_id}).scalar_one()
+            if attempts < MAX_ATTEMPTS:
+                conn.execute(text("UPDATE requests SET retry_at = :t WHERE id = :r"),
+                             {"t": now + BACKOFF_BASE_SECONDS * 2 ** (attempts - 1), "r": request_id})
+                return
+        conn.execute(text(
+            "UPDATE requests SET state = 'failed', last_error = :e, last_status = :s, finished_at = :now WHERE id = :r"),
+            {"e": error, "s": status, "now": now, "r": request_id})
+        if status in (401, 403):
+            conn.execute(text("UPDATE request_engine_state SET state = 'halted', halt_reason = :why WHERE id = 1"),
+                         {"why": f"Massive answered HTTP {status} for request {request_id}: {error}"})
 
     def _heartbeat(self, now: float) -> None:
         with self._db.begin() as conn:
