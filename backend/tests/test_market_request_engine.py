@@ -49,7 +49,11 @@ class FakeTransport:
             r = self.responses[path]
             if isinstance(r, Exception):
                 raise r
-            return r[n - 1] if isinstance(r, list) else r
+            if isinstance(r, list):
+                r = r[n - 1]
+                if isinstance(r, Exception):
+                    raise r
+            return r
         finally:
             with self._lock:
                 self.in_flight -= 1
@@ -295,3 +299,90 @@ def test_market_cli_job_with_the_engine_down_exits_1_with_the_not_running_messag
     src = _source(market_engine, tmp_path, FakeClock())
     assert main(["reference-sync", "--as-of", "2026-11-13"], source=src, engine=market_engine, lake=lake) == 1
     assert NOT_RUNNING in capsys.readouterr().err
+
+SPLITS = "/v3/reference/splits"
+DIVS = "/v3/reference/dividends"
+
+
+def _split(t):
+    return {"ticker": t, "execution_date": "2020-01-02", "split_from": 1, "split_to": 2}
+
+
+def _enqueue(w, path):
+    from hundred_acre.market.request_engine import enqueue
+    return enqueue(w.db, path, {}, requester="t", now=w.clock())
+
+
+def _state(db, request_id):
+    with db.connect() as conn:
+        return tuple(conn.execute(text("SELECT state, last_status FROM requests WHERE id = :i"), {"i": request_id}).one())
+
+
+def test_5xx_on_page_two_is_retried_with_backoff_without_refetching_page_one(world):
+    w = world({SPLITS: [{"results": [_split("A")], "next_cursor": "c2"}, MassiveError("boom", 503),
+                        {"results": [_split("B")]}]}, per_minute=100)
+    assert [s.ticker for s in w.source.splits(date(2020, 1, 1))] == ["A", "B"]
+    assert [c[2].get("cursor") for c in w.transport.calls] == [None, "c2", "c2"]
+    assert w.transport.calls[2][0] - w.transport.calls[1][0] >= 1
+
+
+def test_network_errors_and_timeouts_are_retried_too(world):
+    w = world({SPLITS: [MassiveError("timed out"), MassiveError("reset"), {"results": [_split("A")]}]}, per_minute=100)
+    assert [s.ticker for s in w.source.splits(date(2020, 1, 1))] == ["A"]
+    assert len(w.transport.calls) == 3
+
+
+def test_after_five_transient_failures_the_request_fails_as_market_data_unavailable(world):
+    w = world({SPLITS: MassiveError("boom", 500)}, per_minute=100)
+    with pytest.raises(MarketDataUnavailable):
+        w.source.splits(date(2020, 1, 1))
+    assert len(w.transport.calls) == 5
+    gaps = [b[0] - a[0] for a, b in zip(w.transport.calls, w.transport.calls[1:])]
+    assert gaps == sorted(gaps) and gaps[-1] > gaps[0]  # exponential
+
+
+def test_a_429_stops_all_calls_for_60_seconds_and_is_not_an_attempt(world):
+    w = world({SPLITS: [MassiveError("slow down", 429)] + [MassiveError("boom", 500)] * 4 + [{"results": []}],
+               DIVS: {"results": []}}, per_minute=100)
+    a, b = _enqueue(w, SPLITS), _enqueue(w, DIVS)
+    w.engine.serve()
+    t429 = w.transport.calls[0][0]
+    assert all(c[0] >= t429 + 60 for c in w.transport.calls[1:])
+    # 4 transient failures after the 429 still leave a 5th attempt: the 429 was not counted
+    assert _state(w.db, a) == ("complete", None) and _state(w.db, b) == ("complete", None)
+
+
+def test_a_404_fails_that_request_immediately_and_others_continue(world):
+    w = world({SPLITS: MassiveError("nope", 404), DIVS: {"results": []}}, per_minute=100)
+    a, b = _enqueue(w, SPLITS), _enqueue(w, DIVS)
+    w.engine.serve()
+    assert _state(w.db, a) == ("failed", 404) and _state(w.db, b) == ("complete", None)
+    assert len([c for c in w.transport.calls if c[1] == SPLITS]) == 1
+
+
+def test_a_401_halts_the_engine_across_restarts_until_resume(world, market_engine):
+    from hundred_acre.market.cli import main
+
+    w = world({SPLITS: [MassiveError("bad key", 401)], DIVS: {"results": []}}, per_minute=100)
+    a, b = _enqueue(w, SPLITS), _enqueue(w, DIVS)
+    w.engine.serve()
+    assert _state(w.db, a) == ("failed", 401) and _state(w.db, b) == ("queued", None)
+    assert len(w.transport.calls) == 1
+    with market_engine.connect() as conn:
+        state, reason = conn.execute(text("SELECT state, halt_reason FROM request_engine_state")).one()
+    assert state == "halted" and "401" in reason
+    w.engine = w.new_engine()
+    w.engine.serve()
+    assert len(w.transport.calls) == 1
+    assert main(["request-engine", "resume"], engine=market_engine) == 0  # database only: no env needed
+    w.engine = w.new_engine()
+    w.engine.serve()
+    assert _state(w.db, b) == ("complete", None)
+
+
+def test_a_403_halts_too(world, market_engine):
+    w = world({SPLITS: MassiveError("plan", 403), DIVS: {"results": []}}, per_minute=100)
+    _enqueue(w, SPLITS), _enqueue(w, DIVS)
+    w.engine.serve()
+    with market_engine.connect() as conn:
+        assert conn.execute(text("SELECT state FROM request_engine_state")).scalar() == "halted"
