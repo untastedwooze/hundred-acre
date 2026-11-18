@@ -1,6 +1,6 @@
 """Requests carry a Priority Class, stored by name.
 
-Revision ID: 0027
+Revision ID: 0028
 Revises: 0026
 Create Date: 2026-11-18
 """
@@ -8,8 +8,8 @@ Create Date: 2026-11-18
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0027"
-down_revision = "0026"
+revision = "0028"
+down_revision = "0027"
 branch_labels = None
 depends_on = None
 
