@@ -1,0 +1,6 @@
+# rsync/rclone --exclude-from list for the offsite sync of the DuckLake Parquet files (ADR-0002).
+# Request Engine response bodies are raw JSON, pruned after 90 days; Bars are the durable product of every
+# response, so they are never backed up offsite. Keep the responses directory (MARKET_RESPONSES_DIR) outside
+# MARKET_DATA_PATH; if it is nested inside, these patterns exclude it.
+responses/
+*.json.gz
