@@ -6,13 +6,11 @@ import SeriesChart from './factors/SeriesChart'
 type Beta = { factor: string; value: number; t: number }
 type Point = { window_end: string; alpha: number; r_squared: number; betas: Beta[] }
 type Vintage = { vintage: string; through_date: string }
-type Exposures = { series: Point[]; vintage: Vintage | null; empty_reason: string | null; message: string | null }
+type Exposures = { attribution: string; series: Point[]; vintage: Vintage | null; empty_reason: string | null; message: string | null }
 type State = { status: 'idle' } | { status: 'loading' } | { status: 'error' } | { status: 'ok'; data: Exposures }
 
 const MODELS = ['ff6', 'ff3', 'capm'] as const
 type Model = (typeof MODELS)[number]
-
-const ATTRIBUTION = 'Factor Returns: Kenneth R. French Data Library (Tuck School of Business at Dartmouth).'
 
 /** Rolling Factor Exposures of one Security: each coefficient, alpha (daily) and R² over time. */
 export default function FactorExposuresPage() {
@@ -84,7 +82,7 @@ export default function FactorExposuresPage() {
           <SeriesChart label="R²" points={data.series.map((p) => ({ date: p.window_end, value: p.r_squared }))} />
         </section>
       )}
-      <p>{ATTRIBUTION}</p>
+      {data && <p>{data.attribution}</p>}
     </>
   )
 }

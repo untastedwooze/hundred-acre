@@ -6,6 +6,7 @@ the Delisting outcome (cash per share, or ratio x target close, over the last cl
 Delisted Securities are never dropped. Factor Exposures, Own Factors and the backtester all read returns through here.
 """
 
+import logging
 from collections.abc import Sequence
 from datetime import date, timedelta
 
@@ -15,6 +16,7 @@ from sqlalchemy import Engine, text
 from hundred_acre.market.delistings import Delisting, delisting
 from hundred_acre.market.lake import Lake, read_bars
 
+log = logging.getLogger(__name__)
 RETURN_COLUMNS = ("security_id", "trading_date", "total_return")
 _SCHEMA = {"security_id": pl.Int64, "trading_date": pl.Date, "total_return": pl.Float64}
 
@@ -69,7 +71,12 @@ def daily_total_returns(
             continue
         final_day = _next_trading_day(engine, d.delisted_on)
         value = _final_return(lake, d, last_close)
-        if value is not None and final_day <= end:
+        if value is None:
+            log.warning(
+                "Security %s: Conversion Delisting final return skipped, target Security %s has no close on or before %s",
+                sid, d.target_security_id, d.delisted_on,
+            )
+        elif final_day <= end:
             extra.append((sid, final_day, value))
     frames.append(pl.DataFrame(extra, schema=_SCHEMA, orient="row"))
     return (

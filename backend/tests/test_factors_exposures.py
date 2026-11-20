@@ -232,3 +232,25 @@ def test_a_delisting_outcome_change_marks_only_that_security_stale(market_engine
     set_delisting_outcome(market_engine, ids["AAA"], worthless=True)
 
     assert refresh(market_engine, lake).rebuilt == [ids["AAA"]]
+
+
+def test_a_correction_to_a_conversion_target_marks_the_converted_security_stale(market_engine, lake, setup):
+    from sqlalchemy import text
+
+    from hundred_acre.market.delistings import set_delisting_outcome
+
+    days, matrix = setup
+    closes = {"AAA": prices_from(matrix, ALPHA, BETAS), "TGT": prices_from(matrix, 0.0, BETAS), "BBB": prices_from(matrix, 0.0, BETAS)}
+    _, ids = load_world(market_engine, lake, days, closes)
+    with market_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO delistings (security_id, delisted_on, outcome, cash_per_share, assumed) VALUES (:s, :d, 'cash', 100, true)"),
+            {"s": ids["AAA"], "d": days[-1]},
+        )
+    set_delisting_outcome(market_engine, ids["AAA"], convert_to=ids["TGT"], ratio=1.0)
+    refresh(market_engine, lake)
+
+    corrected = {**closes, "TGT": closes["TGT"][:-1] + [closes["TGT"][-1] * 1.01]}
+    replace_bars(lake, bars_frame(ids, days, corrected, only=[ids["TGT"]]), [ids["TGT"]], days)
+
+    assert sorted(refresh(market_engine, lake).rebuilt) == sorted([ids["AAA"], ids["TGT"]])

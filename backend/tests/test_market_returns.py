@@ -1,5 +1,7 @@
 from datetime import date
 
+import logging
+
 import pytest
 
 from hundred_acre.market.adjustments import sync_corporate_actions
@@ -128,3 +130,17 @@ def test_final_return_is_outside_a_range_that_ends_before_it(market_engine, lake
     set_delisting_outcome(market_engine, ids["GONE"], worthless=True)
 
     assert returns(market_engine, lake, ids, "GONE", end=D2) == {D2: pytest.approx(100.0 / 90.0 - 1)}
+
+
+def test_conversion_whose_target_has_no_close_is_logged_not_silently_dropped(market_engine, lake, caplog):
+    source, ids = world(
+        market_engine, lake, {"GONE": {D1: 90.0, D2: 100.0}, "TGT": {D3: 22.0}}, delisted={"GONE": D2},
+    )
+    sync_delistings(market_engine, lake)
+    set_delisting_outcome(market_engine, ids["GONE"], convert_to=ids["TGT"], ratio=5.0)
+
+    with caplog.at_level(logging.WARNING):
+        got = returns(market_engine, lake, ids, "GONE")
+
+    assert D3 not in got
+    assert any(f"{ids['GONE']}" in r.message and f"{ids['TGT']}" in r.message for r in caplog.records)

@@ -64,3 +64,28 @@ def test_same_day_a_b_a_reimport_does_not_duplicate_vintage_rows(market_engine, 
     assert third.created and third.vintage != first.vintage
     n = read_reference_factor_returns(lake, vintage=first.vintage).height
     assert read_reference_factor_returns(lake, vintage=third.vintage).height == n == first.rows
+
+
+class ExplodingSource:
+    def fetch(self, *a, **k):
+        raise ValueError("boom")
+
+    def __getattr__(self, name):
+        def fail(*a, **k):
+            raise ValueError("boom")
+        return fail
+
+
+def test_any_exception_in_the_factor_import_is_logged_and_does_not_block_the_refresh(market_engine, lake, caplog):
+    days = trading_days(market_engine)
+    matrix = factor_matrix(len(days))
+    import_reference_factor_returns(lake, factor_source(days, matrix), now=T1)
+    _, ids = load_world(market_engine, lake, days, {"AAA": prices_from(matrix, 0.0003, [1.1, 0.4, -0.3, 0.2, 0.15, -0.25])})
+
+    jobs.run_weekly(
+        FakeMarketDataSource(), MON, engine=market_engine, lake=lake,
+        factor_source=ExplodingSource(), exposure_window_days=WINDOW_DAYS,
+    )
+
+    assert "Reference Factor Return import failed" in caplog.text
+    assert read_factor_exposures(lake, [ids["AAA"]], days[0], days[-1], model="ff6").height > 0

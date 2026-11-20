@@ -8,9 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import Engine, create_engine
 
 from hundred_acre.market.db import market_database_url
-from hundred_acre.market.factors import FRENCH_ATTRIBUTION, latest_vintage, read_factor_exposures
-from hundred_acre.market.factors.cli import LABELS
-from hundred_acre.market.factors.exposures import MODELS
+from hundred_acre.market.factors import FACTOR_LABELS, FRENCH_ATTRIBUTION, MODELS, latest_vintage, lookup_factor_exposures
 from hundred_acre.market.lake import Lake
 from hundred_acre.market.reference import security_on
 
@@ -64,26 +62,15 @@ def factor_exposures(
     vintage = _vintage(lake)
     base = {"ticker": ticker, "model": model, "vintage": vintage, "attribution": FRENCH_ATTRIBUTION, "series": []}
 
-    def empty(reason: str, message: str) -> dict:
-        return {**base, "empty_reason": reason, "message": message}
-
-    security_id = security_on(engine, ticker, on)
-    if security_id is None:
-        return empty("unknown_ticker", f"No Security has the Ticker {ticker} on {on}.")
-    if vintage is None:
-        return empty("no_factor_returns", "No Reference Factor Returns have been imported yet; run `market factors import`.")
-    df = read_factor_exposures(lake, [security_id], date.min, on, model=model)
-    if df.height == 0:
-        return empty(
-            "no_exposures",
-            f"No {model.upper()} exposures for {ticker}: too little history (a window needs enough days with both a "
-            "return and a Factor Return), or Factor Returns do not reach a month-end window yet.",
-        )
+    found = lookup_factor_exposures(engine, lake, ticker, model, on)
+    if found.exposures is None:
+        return {**base, "empty_reason": found.empty_reason, "message": found.message}
+    df, security_id = found.exposures, found.security_id
     series = [
         {
             "window_start": str(r["window_start"]), "window_end": str(r["window_end"]), "n_obs": r["n_obs"],
             "alpha": r["alpha"], "t_alpha": r["t_alpha"], "r_squared": r["r_squared"],
-            "betas": [{"factor": LABELS[f], "value": r[f"beta_{f}"], "t": r[f"t_{f}"]} for f in MODELS[model]],
+            "betas": [{"factor": FACTOR_LABELS[f], "value": r[f"beta_{f}"], "t": r[f"t_{f}"]} for f in MODELS[model]],
         }
         for r in df.sort("window_end").iter_rows(named=True)
     ]
