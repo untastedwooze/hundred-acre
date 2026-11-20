@@ -70,3 +70,19 @@ API: `GET /api/spend/total` returns `{"dollars": "<full precision>", "unpriced_m
 Nightly offsite backup of `hundred_acre_spend` (systemd user timer, restore steps): see [ops/backup/README.md](ops/backup/README.md).
 
 Each Feature's Spend is split into Build and Maintenance Spend per message: a message timestamped at or before the top-level issue's first-closed date is Build, a later one is Maintenance (a Session that straddles the close is split). Reopening and re-closing never moves the date. Each Feature also carries `build_dollars`, `maintenance_dollars` and `completed_at` (the first-closed date, null while never closed), which the cumulative chart draws as completion markers; with GitHub unreachable the chart simply has none.
+
+## Market data (Postgres + DuckLake, ADR-0002)
+
+`docker compose up -d` runs a dedicated hundred-acre Postgres (`localhost:5433`, role `hundred_acre`, database `hundred_acre_market`). Migrate with Alembic (history in `backend/src/hundred_acre/market/migrations`):
+
+```bash
+cd backend && uv run python -c "from hundred_acre.market.db import migrate; migrate()"
+```
+
+| Env var | Default |
+| --- | --- |
+| `MARKET_DATABASE_URL` | `postgresql+psycopg://hundred_acre:hundred_acre@localhost:5433/hundred_acre_market` (also the DuckLake catalog) |
+| `MARKET_TEST_SERVER_URL` | `postgresql+psycopg://hundred_acre:hundred_acre@localhost:5433/postgres` (creates/drops throwaway test DBs) |
+| `MARKET_DATA_PATH` | none; directory for the DuckLake Parquet files (used by `Lake.from_env()`) |
+
+Tests use the `market_engine` and `lake` fixtures: a throwaway migrated database and a temp DuckLake directory. DuckDB's `ducklake` and `postgres` extensions are installed on first use (needs network once).

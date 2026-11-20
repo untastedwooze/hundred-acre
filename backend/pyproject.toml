@@ -5,15 +5,19 @@ description = "hundred-acre backend API and Spend tracking"
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20.1",
+    "duckdb>=2.0.0",
+    "exchange-calendars>=4.13.3",
     "fastapi>=0.163.1",
     "polars>=2.1.0",
     "psycopg[binary]>=3.3.9",
+    "pyarrow>=26.0.1",
     "sqlalchemy>=2.1.8",
     "uvicorn[standard]>=0.54.0",
 ]
 
 [project.scripts]
 spend = "hundred_acre.spend.cli:main"
+market = "hundred_acre.market.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -24,6 +28,8 @@ packages = ["src/hundred_acre"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-m 'not perf'"
+markers = ["perf: opt-in performance checks, run with `pytest -m perf`"]
 
 [dependency-groups]
 dev = [
