@@ -197,3 +197,38 @@ def test_ff3_and_capm_are_stored_alongside_ff6_and_readable_by_model(market_engi
     assert capm["t_mkt_rf"] == pytest.approx(slope / se, rel=1e-6)
     assert capm["r_squared"] == pytest.approx(1 - (resid @ resid) / ((y - y.mean()) ** 2).sum(), abs=1e-9)
     assert capm["n_obs"] == WINDOW_DAYS
+
+
+def test_a_corporate_action_change_marks_only_that_security_stale(market_engine, lake, setup):
+    from hundred_acre.market.adjustments import sync_corporate_actions
+    from hundred_acre.market.source import Split
+
+    days, matrix = setup
+    closes = prices_from(matrix, ALPHA, BETAS)
+    source, ids = load_world(market_engine, lake, days, {"AAA": closes, "BBB": prices_from(matrix, 0.0, BETAS[::-1])})
+    refresh(market_engine, lake)
+
+    source.split_list = [Split("AAA", days[3], 1, 2, id="s1")]
+    sync_corporate_actions(source, days[0], engine=market_engine, lake=lake)
+
+    assert refresh(market_engine, lake).rebuilt == [ids["AAA"]]
+    assert refresh(market_engine, lake).rebuilt == []
+
+
+def test_a_delisting_outcome_change_marks_only_that_security_stale(market_engine, lake, setup):
+    from sqlalchemy import text
+
+    from hundred_acre.market.delistings import set_delisting_outcome
+
+    days, matrix = setup
+    _, ids = load_world(market_engine, lake, days, {"AAA": prices_from(matrix, ALPHA, BETAS), "BBB": prices_from(matrix, 0.0, BETAS)})
+    with market_engine.begin() as conn:
+        conn.execute(
+            text("INSERT INTO delistings (security_id, delisted_on, outcome, cash_per_share, assumed) VALUES (:s, :d, 'cash', 100, true)"),
+            {"s": ids["AAA"], "d": days[-1]},
+        )
+    refresh(market_engine, lake)
+
+    set_delisting_outcome(market_engine, ids["AAA"], worthless=True)
+
+    assert refresh(market_engine, lake).rebuilt == [ids["AAA"]]

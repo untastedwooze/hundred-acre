@@ -118,7 +118,8 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
             if job is None:
                 print(f"market: the {args.command} job is not available yet", file=sys.stderr)
                 return 2
-            job(source, args.as_of, engine=engine, lake=lake)
+            extra = {"factor_source": factor_source} if args.command == "weekly" and factor_source is not None else {}
+            job(source, args.as_of, engine=engine, lake=lake, **extra)
     except MarketDataUnavailable as exc:
         print(f"market: data source unavailable: {exc}", file=sys.stderr)
         return 1
