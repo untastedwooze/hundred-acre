@@ -91,7 +91,7 @@ def test_a_window_with_under_80_percent_coverage_is_skipped(market_engine, lake,
 
     refresh(market_engine, lake)
 
-    df = read_factor_exposures(lake, [ids["THIN"], ids["MILD"]], days[0], days[-1])
+    df = read_factor_exposures(lake, [ids["THIN"], ids["MILD"]], days[0], days[-1]).filter(pl.col("model") == "ff6")
     windows = {sid: df.filter(pl.col("security_id") == sid)["window_end"].to_list() for sid in (ids["THIN"], ids["MILD"])}
     assert windows == {ids["THIN"]: [AUG_END], ids["MILD"]: [AUG_END, WINDOW_END]}  # THIN's Sep window is under 80%
     row = df.filter(pl.col("security_id") == ids["MILD"]).row(-1, named=True)
