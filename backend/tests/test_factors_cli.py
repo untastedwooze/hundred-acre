@@ -104,6 +104,7 @@ def test_exposures_model_selects_ff3_and_capm(market_engine, lake, world, capsys
     out = capsys.readouterr().out
     assert "FF3 exposure" in out and "HML" in out and "RMW" not in out
 
+
 def test_import_report_includes_range_and_vintage_for_created_and_unchanged(market_engine, lake, capsys):
     days = trading_days(market_engine)
     source = factor_source(days, factor_matrix(len(days)))
