@@ -8,6 +8,7 @@ dependencies = [
     "duckdb>=2.0.0",
     "exchange-calendars>=4.13.3",
     "fastapi>=0.163.1",
+    "numpy>=2.0",
     "polars>=2.1.0",
     "psycopg[binary]>=3.3.9",
     "pyarrow>=26.0.1",

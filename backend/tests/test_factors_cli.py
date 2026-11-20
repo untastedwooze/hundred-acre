@@ -63,8 +63,10 @@ def test_exposures_prints_the_latest_ff6_window(market_engine, lake, world, caps
 def test_exposures_date_selects_the_window_ending_on_or_before_it(market_engine, lake, world, capsys):
     refreshed(market_engine, lake, world)
 
-    assert run(["factors", "exposures", "AAA", "--date", "2026-09-29"], market_engine, lake) == 1
+    assert run(["factors", "exposures", "AAA", "--date", "2026-08-30"], market_engine, lake) == 1
     assert "no FF6 exposures" in capsys.readouterr().err
+    assert run(["factors", "exposures", "AAA", "--date", "2026-09-29"], market_engine, lake) == 0
+    assert "to 2026-08-31" in capsys.readouterr().out
     assert run(["factors", "exposures", "AAA", "--date", "2026-10-05"], market_engine, lake) == 0
     assert f"to {WINDOW_END}" in capsys.readouterr().out
 
@@ -90,3 +92,14 @@ def test_each_no_exposures_message(market_engine, lake, world, capsys):
     assert "too little history" in capsys.readouterr().err
     assert run(["factors", "exposures", "ZZZ"], market_engine, lake) == 1
     assert "unknown Ticker" in capsys.readouterr().err
+
+
+def test_exposures_model_selects_ff3_and_capm(market_engine, lake, world, capsys):
+    refreshed(market_engine, lake, world)
+
+    assert run(["factors", "exposures", "AAA", "--model", "capm"], market_engine, lake) == 0
+    out = capsys.readouterr().out
+    assert "CAPM exposure" in out and "Mkt-RF" in out and "SMB" not in out
+    assert run(["factors", "exposures", "AAA", "--model", "ff3"], market_engine, lake) == 0
+    out = capsys.readouterr().out
+    assert "FF3 exposure" in out and "HML" in out and "RMW" not in out
