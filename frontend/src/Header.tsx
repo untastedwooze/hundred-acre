@@ -21,6 +21,9 @@ export default function Header() {
   return (
     <header>
       <strong>hundred-acre</strong>
+      <nav aria-label="Main">
+        <Link to="/factors">Factor Exposures</Link>
+      </nav>
       <span aria-label="Total Spend">
         {state.status === 'ok' && (
           <>
