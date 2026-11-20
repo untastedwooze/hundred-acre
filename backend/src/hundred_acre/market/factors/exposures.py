@@ -9,8 +9,7 @@ Every row records its method, parameters, a fingerprint of the Security's source
 and Delisting), the DuckLake Bar snapshot and the Factor Return vintage it was computed from. A Security whose
 fingerprint or vintage no longer matches is stale and is rebuilt.
 
-This tracer bullet estimates the single latest month-end window for FF6; `MODELS` and `_window_ends` are the seams
-along which further models and rolling windows extend it.
+Windows roll at every month-end (#44) and CAPM, FF3 and FF6 are estimated for each.
 """
 
 import json
@@ -27,7 +26,9 @@ from hundred_acre.market.factors.source import FACTOR_COLUMNS
 from hundred_acre.market.lake import Lake, current_snapshot, read_bars, transaction
 from hundred_acre.market.returns import daily_total_returns
 
-MODELS: dict[str, tuple[str, ...]] = {"ff6": FACTOR_COLUMNS}
+MODELS: dict[str, tuple[str, ...]] = {
+    "capm": FACTOR_COLUMNS[:1], "ff3": FACTOR_COLUMNS[:3], "ff6": FACTOR_COLUMNS,
+}
 METHOD = "OLS of daily excess total returns on daily Reference Factor Returns, with intercept (alpha, daily)"
 DEFAULT_WINDOW_DAYS = 252
 DEFAULT_MIN_COVERAGE = 0.8
@@ -52,7 +53,8 @@ class ExposureRefreshResult:
 
 
 def _window_ends(engine: Engine, vintage: VintageInfo, window_days: int) -> list[tuple[date, list[date]]]:
-    """(window end, window's trading days) pairs to estimate: the latest month-end on or before the last Factor Return."""
+    """(window end, window's trading days) pairs to estimate: every month-end on or before the last Factor Return
+    with a full `window_days` of history."""
     with engine.connect() as conn:
         days = [
             r[0] for r in conn.execute(
@@ -61,11 +63,12 @@ def _window_ends(engine: Engine, vintage: VintageInfo, window_days: int) -> list
             )
         ]
     month_ends = [d for d, nxt in zip(days, days[1:]) if (d.year, d.month) != (nxt.year, nxt.month) and d <= vintage.last_date]
-    if not month_ends:
-        return []
-    end = month_ends[-1]
-    window = [d for d in days if d <= end][-window_days:]
-    return [(end, window)] if len(window) == window_days else []
+    out = []
+    for end in month_ends:
+        window = [d for d in days if d <= end][-window_days:]
+        if len(window) == window_days:
+            out.append((end, window))
+    return out
 
 
 def _fingerprints(engine: Engine, con) -> dict[int, str]:
