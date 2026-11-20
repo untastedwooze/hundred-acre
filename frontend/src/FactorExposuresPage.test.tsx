@@ -8,7 +8,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 const ok = (body: unknown) => ({ ok: true, json: async () => body });
 const vintage = { vintage: "2026-11-01-abc", imported_at: "2026-11-01T00:00:00+00:00", through_date: "2026-10-15" };
-const ATTRIBUTION = "Kenneth R. French Data Library";
+const ATTRIBUTION = "Attribution text served by the API.";
 
 function point(end: string, alpha: number, factors: string[]) {
   return {
@@ -58,9 +58,8 @@ test("charts each coefficient, alpha and R-squared for the chosen Ticker", async
 test("shows the vintage, through-date and French attribution", async () => {
   stub(() => exposures("ff6", FF6));
   renderPage();
-  expect(screen.getByText(/Kenneth R\. French Data Library/)).toBeTruthy();
-  expect(screen.getByText(/Tuck School of Business at Dartmouth/)).toBeTruthy();
   search("AAA");
+  expect(await screen.findByText(ATTRIBUTION)).toBeTruthy();
   expect(await screen.findByText(/vintage 2026-11-01-abc, through 2026-10-15/i)).toBeTruthy();
 });
 

@@ -5,8 +5,8 @@ rate) is regressed on the model's Factor Returns plus an intercept (alpha, daily
 Trading Calendar days ending at a month-end trading day; a window is estimated only when its end is on or before the
 vintage's last Factor Return and at least `min_coverage` of its days have both a Security return and a Factor Return.
 
-Every row records its method, parameters, a fingerprint of the Security's source data (Daily Bars, Adjustment Factors
-and Delisting), the DuckLake Bar snapshot and the Factor Return vintage it was computed from. A Security whose
+Every row records its method, parameters, a fingerprint of the Security's source data (Daily Bars, Adjustment Factors,
+Delisting and a Conversion Delisting's target Bars), the DuckLake Bar snapshot and the Factor Return vintage it was computed from. A Security whose
 fingerprint or vintage no longer matches is stale and is rebuilt.
 
 Windows roll at every month-end (#44) and CAPM, FF3 and FF6 are estimated for each.
@@ -29,6 +29,7 @@ from hundred_acre.market.returns import daily_total_returns
 MODELS: dict[str, tuple[str, ...]] = {
     "capm": FACTOR_COLUMNS[:1], "ff3": FACTOR_COLUMNS[:3], "ff6": FACTOR_COLUMNS,
 }
+FACTOR_LABELS = dict(zip(FACTOR_COLUMNS, ("Mkt-RF", "SMB", "HML", "RMW", "CMA", "UMD")))
 METHOD = "OLS of daily excess total returns on daily Reference Factor Returns, with intercept (alpha, daily)"
 DEFAULT_WINDOW_DAYS = 252
 DEFAULT_MIN_COVERAGE = 0.8
@@ -82,7 +83,11 @@ def _fingerprints(engine: Engine, con) -> dict[int, str]:
     out = {}
     for sid, p in parts.items():
         if any(t == "daily_bars" for t, *_ in p):
-            out[sid] = json.dumps(sorted(p) + [("delisting", repr(delisting(engine, sid)))])
+            d = delisting(engine, sid)
+            extra = [("delisting", repr(d))]
+            if d is not None and d.target_security_id is not None:  # a conversion's return reads the target's Bars
+                extra.append(("target_bars", repr(sorted(x for x in parts.get(d.target_security_id, []) if x[0] == "daily_bars"))))
+            out[sid] = json.dumps(sorted(p) + extra)
     return out
 
 

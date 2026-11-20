@@ -1,3 +1,5 @@
+from datetime import date
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -67,7 +69,7 @@ def test_exposure_series_filtered_by_model(client, market_engine, lake, world):
 
 @pytest.mark.parametrize(
     "ticker,reason",
-    [("NOPE", "unknown_ticker"), ("THIN", "no_exposures")],
+    [("NOPE", "unknown_ticker"), ("THIN", "too_little_history")],
 )
 def test_empty_responses_say_why(client, market_engine, lake, world, ticker, reason):
     refreshed(market_engine, lake, world)
@@ -82,3 +84,16 @@ def test_no_factor_returns_yet(client, world):
 
 def test_rejects_an_unknown_model(client, world):
     assert client.get("/api/market/factors/exposures", params={"ticker": "AAA", "model": "x"}).status_code == 422
+
+
+def test_factor_returns_short_of_a_month_end_is_distinct_from_too_little_history(client, market_engine, lake, world):
+    days, matrix = world
+    import_reference_factor_returns(lake, factor_source(days, matrix, through=date(2026, 6, 20)), now=T1)
+    refresh_factor_exposures(market_engine, lake, window_days=WINDOW_DAYS)
+
+    body = client.get("/api/market/factors/exposures", params={"ticker": "AAA"}).json()
+    thin = client.get("/api/market/factors/exposures", params={"ticker": "THIN"}).json()
+
+    assert body["series"] == [] and body["empty_reason"] == "factor_returns_not_at_month_end"
+    assert thin["empty_reason"] == "too_little_history"
+    assert body["message"] != thin["message"] and "month-end" in body["message"] and "month-end" not in thin["message"]

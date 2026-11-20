@@ -64,7 +64,7 @@ def test_exposures_date_selects_the_window_ending_on_or_before_it(market_engine,
     refreshed(market_engine, lake, world)
 
     assert run(["factors", "exposures", "AAA", "--date", "2026-08-30"], market_engine, lake) == 1
-    assert "no FF6 exposures" in capsys.readouterr().err
+    assert "No FF6 exposures" in capsys.readouterr().err
     assert run(["factors", "exposures", "AAA", "--date", "2026-09-29"], market_engine, lake) == 0
     assert "to 2026-08-31" in capsys.readouterr().out
     assert run(["factors", "exposures", "AAA", "--date", "2026-10-05"], market_engine, lake) == 0
@@ -79,19 +79,19 @@ def test_ticker_is_resolved_as_of_the_requested_date(market_engine, lake, world,
     refreshed(market_engine, lake, world)
 
     assert run(["factors", "exposures", "OLDA", "--date", "2026-10-05"], market_engine, lake) == 1  # not its Ticker then
-    assert "unknown Ticker" in capsys.readouterr().err
+    assert "Unknown Ticker" in capsys.readouterr().err
     assert run(["factors", "exposures", "OLDA", "--date", "2026-09-30"], market_engine, lake) == 0
     assert run(["factors", "exposures", "NEWA", "--date", "2026-10-05"], market_engine, lake) == 0
 
 
 def test_each_no_exposures_message(market_engine, lake, world, capsys):
     assert run(["factors", "exposures", "AAA"], market_engine, lake) == 1
-    assert "no Reference Factor Returns yet" in capsys.readouterr().err
+    assert "No Reference Factor Returns yet" in capsys.readouterr().err
     refreshed(market_engine, lake, world)
     assert run(["factors", "exposures", "THIN"], market_engine, lake) == 1
     assert "too little history" in capsys.readouterr().err
     assert run(["factors", "exposures", "ZZZ"], market_engine, lake) == 1
-    assert "unknown Ticker" in capsys.readouterr().err
+    assert "Unknown Ticker" in capsys.readouterr().err
 
 
 def test_exposures_model_selects_ff3_and_capm(market_engine, lake, world, capsys):
@@ -131,3 +131,34 @@ def test_unreachable_import_exits_nonzero_and_keeps_vintage(market_engine, lake,
     assert "previous vintage kept" in capsys.readouterr().err
     from hundred_acre.market.factors import read_reference_factor_returns
     assert read_reference_factor_returns(lake).height > 0
+
+
+def test_refresh_rebuilds_only_stale_securities_and_full_rebuilds_everything(market_engine, lake, world, capsys):
+    days, matrix, _ = world
+    import_reference_factor_returns(lake, factor_source(days, matrix), now=T1)
+
+    assert run(["factors", "refresh"], market_engine, lake) == 0
+    assert "Securities rebuilt: 1" in capsys.readouterr().out
+    refreshed(market_engine, lake, world)  # stores estimates, so nothing is stale afterwards
+    assert run(["factors", "refresh"], market_engine, lake) == 0
+    assert "Securities rebuilt: 0" in capsys.readouterr().out
+    assert run(["factors", "refresh", "--full"], market_engine, lake) == 0
+    assert "Securities rebuilt: 1" in capsys.readouterr().out
+
+
+def test_refresh_before_any_import_says_so(market_engine, lake, world, capsys):
+    assert run(["factors", "refresh"], market_engine, lake) == 1
+    assert "No Reference Factor Returns yet" in capsys.readouterr().err
+
+
+def test_cli_distinguishes_factor_returns_short_of_a_month_end(market_engine, lake, world, capsys):
+    days, matrix, _ = world
+    import_reference_factor_returns(lake, factor_source(days, matrix, through=date(2026, 6, 20)), now=T1)
+    refresh_factor_exposures(market_engine, lake, window_days=WINDOW_DAYS)
+
+    assert run(["factors", "exposures", "AAA"], market_engine, lake) == 1
+    err = capsys.readouterr().err
+    assert "month-end" in err and "too little history" not in err
+    assert run(["factors", "exposures", "THIN"], market_engine, lake) == 1
+    err = capsys.readouterr().err
+    assert "too little history" in err and "month-end" not in err

@@ -11,7 +11,7 @@ from sqlalchemy import Engine
 
 from hundred_acre.market.coverage import days_to_fetch, mark_suspect, record_coverage
 from hundred_acre.market.factors import (
-    ReferenceFactorError, ReferenceFactorSource, import_reference_factor_returns, refresh_factor_exposures,
+    FrenchDataLibrarySource, ReferenceFactorSource, import_reference_factor_returns, refresh_factor_exposures,
 )
 from hundred_acre.market.lake import BAR_SCHEMA as _SCHEMA
 from hundred_acre.market.lake import (
@@ -295,13 +295,11 @@ def run_weekly(
     Bars invalidated, then the Factor Exposure refresh. A failed import is logged and does not block the rest: the
     exposure refresh uses the last good vintage. `factor_source` defaults to French's Data Library."""
     if factor_source is None:
-        from hundred_acre.market.factors import FrenchDataLibrarySource
-
         factor_source = FrenchDataLibrarySource()
     try:
         import_reference_factor_returns(lake, factor_source)
-    except ReferenceFactorError as exc:
-        log.warning("Reference Factor Return import failed, using the last good vintage: %s", exc)
+    except Exception as exc:  # whatever the import hit, the rest of the weekly job still runs
+        log.warning("Reference Factor Return import failed, using the last good vintage: %s", exc, exc_info=True)
     since = as_of - timedelta(days=7)
     sync_reference(source, engine)
     ids = non_watchlist_security_ids(engine, skipped_types=WEEKLY_SKIPPED_TYPES)
