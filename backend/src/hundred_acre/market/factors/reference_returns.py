@@ -1,7 +1,7 @@
 """Reference Factor Returns in DuckLake (#43, ADR-0002/0004): imported as dated, immutable vintages.
 
 Each import that differs from the latest vintage writes a complete new vintage (id = import date + content
-fingerprint). Older vintages are never modified. Monthly returns are compounded from the daily ones at read time.
+fingerprint, plus a counter if that id is already taken, e.g. A, B, A re-imported on one day). Older vintages are never modified. Monthly returns are compounded from the daily ones at read time.
 """
 
 import hashlib
@@ -74,6 +74,11 @@ def import_reference_factor_returns(
         latest = found[0] if found else None
         if latest and latest[1] == fingerprint:
             return ImportResult(False, latest[0], first, last, df.height)
+        taken = {r[0] for r in con.execute("SELECT DISTINCT vintage FROM lake.reference_factor_returns").fetchall()}
+        base, n = vintage, 1
+        while vintage in taken:  # same-day A -> B -> A: a new vintage must not reuse (and duplicate) A's id
+            n += 1
+            vintage = f"{base}-{n}"
         incoming = df.with_columns(
             vintage=pl.lit(vintage), imported_at=pl.lit(now).dt.cast_time_unit("us").dt.replace_time_zone("UTC"),
             fingerprint=pl.lit(fingerprint),
