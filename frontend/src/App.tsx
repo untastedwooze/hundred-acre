@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Route, Routes } from 'react-router-dom'
 import FeatureDetailPage from './FeatureDetailPage'
 import Header from './Header'
+import FactorExposuresPage from './FactorExposuresPage'
 import SpendPage from './SpendPage'
 
 type Health = 'loading' | 'ok' | 'unreachable'
@@ -27,6 +28,7 @@ function App() {
       <main>
         <Routes>
           <Route path="/" element={<Home />} />
+          <Route path="/factors" element={<FactorExposuresPage />} />
           <Route path="/spend" element={<SpendPage />} />
           <Route path="/spend/features/:issue" element={<FeatureDetailPage />} />
         </Routes>
