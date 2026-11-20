@@ -10,6 +10,9 @@ import polars as pl
 from sqlalchemy import Engine
 
 from hundred_acre.market.coverage import days_to_fetch, mark_suspect, record_coverage
+from hundred_acre.market.factors import (
+    FrenchDataLibrarySource, ReferenceFactorSource, import_reference_factor_returns, refresh_factor_exposures,
+)
 from hundred_acre.market.lake import BAR_SCHEMA as _SCHEMA
 from hundred_acre.market.lake import (
     INTRADAY_SCHEMA, Lake, bar_row, expire_snapshots, read_bars, read_intraday_bars, replace_bars,
@@ -282,13 +285,26 @@ def nightly_intraday_bars(source: MarketDataSource, as_of: date, *, engine: Engi
     _resolve_suspect_days(source, as_of, since, watchlist(engine), engine=engine, lake=lake)
 
 
-def run_weekly(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> None:
-    """The `weekly` job: a week of Intraday Bars for every non-Watchlist Security (one call each, warrants, units and
-    rights skipped), then suspect detection against Daily Bars with a re-fetch of each suspect day, then a refresh of
-    the Daily Security Statistics the new Bars invalidated."""
+def run_weekly(
+    source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake,
+    factor_source: ReferenceFactorSource | None = None, exposure_window_days: int | None = None,
+) -> None:
+    """The `weekly` job: the Reference Factor Return import (French's site, not Massive), then a week of Intraday Bars
+    for every non-Watchlist Security (one call each, warrants, units and rights skipped), then suspect detection
+    against Daily Bars with a re-fetch of each suspect day, then a refresh of the Daily Security Statistics the new
+    Bars invalidated, then the Factor Exposure refresh. A failed import is logged and does not block the rest: the
+    exposure refresh uses the last good vintage. `factor_source` defaults to French's Data Library."""
+    if factor_source is None:
+        factor_source = FrenchDataLibrarySource()
+    try:
+        import_reference_factor_returns(lake, factor_source)
+    except Exception as exc:  # whatever the import hit, the rest of the weekly job still runs
+        log.warning("Reference Factor Return import failed, using the last good vintage: %s", exc, exc_info=True)
     since = as_of - timedelta(days=7)
     sync_reference(source, engine)
     ids = non_watchlist_security_ids(engine, skipped_types=WEEKLY_SKIPPED_TYPES)
     backfill_intraday_bars(source, as_of, engine=engine, lake=lake, since=since, security_ids=ids)
     _resolve_suspect_days(source, as_of, since, ids, engine=engine, lake=lake)
     refresh_statistics(lake)
+    extra = {} if exposure_window_days is None else {"window_days": exposure_window_days}
+    refresh_factor_exposures(engine, lake, **extra)

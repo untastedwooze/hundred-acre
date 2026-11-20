@@ -10,6 +10,7 @@ from sqlalchemy import Engine, create_engine, text
 from hundred_acre.market.adjustments import rebuild_adjustment_factors, sync_corporate_actions
 from hundred_acre.market.db import market_database_url, migrate
 from hundred_acre.market.delistings import sync_delistings
+from hundred_acre.market.factors.cli import add_parser as factors_add_parser, run as factors_run
 from hundred_acre.market.jobs import nightly_daily_bars, nightly_intraday_bars
 from hundred_acre.market.lake import Lake
 from hundred_acre.market.statistics import refresh_statistics
@@ -35,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     re_sub.add_parser("resume", help="clear a halt (after fixing the API key or plan); queued Requests then continue")
     run = re_sub.add_parser("run", help="serve queued Requests (configured by environment variables)")
     run.add_argument("--once", action="store_true", help="serve until the queue is empty, then exit")
+    factors_add_parser(sub)
     wl = sub.add_parser("watchlist", help="manage the Watchlist (Securities with nightly Intraday refreshes)")
     wl_sub = wl.add_subparsers(dest="watchlist_command", required=True)
     for name, help_ in (("add", "add a Ticker and backfill its Intraday history"), ("remove", "remove a Ticker")):
@@ -55,7 +57,8 @@ def _job_priority(job: str) -> PriorityClass:
 
 
 def main(argv: list[str] | None = None, *, source: MarketDataSource | None = None,
-         engine: Engine | None = None, lake: Lake | None = None, request_engine=None, clock=time.time) -> int:
+         engine: Engine | None = None, lake: Lake | None = None, request_engine=None, clock=time.time,
+         factor_source=None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "migrate":
         migrate()
@@ -63,6 +66,13 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
 
     if args.command == "request-engine":
         return _request_engine_run(args, engine, request_engine, clock)
+
+    if args.command == "factors":
+        try:
+            return factors_run(args, engine or create_engine(market_database_url()), lake or Lake.from_env(), factor_source)
+        except RuntimeError as exc:
+            print(f"market: {exc}", file=sys.stderr)
+            return 1
 
     if args.command == "watchlist" and args.watchlist_command in ("list", "remove"):
         return _watchlist_offline(args, engine)
@@ -108,7 +118,8 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
             if job is None:
                 print(f"market: the {args.command} job is not available yet", file=sys.stderr)
                 return 2
-            job(source, args.as_of, engine=engine, lake=lake)
+            extra = {"factor_source": factor_source} if args.command == "weekly" and factor_source is not None else {}
+            job(source, args.as_of, engine=engine, lake=lake, **extra)
     except MarketDataUnavailable as exc:
         print(f"market: data source unavailable: {exc}", file=sys.stderr)
         return 1

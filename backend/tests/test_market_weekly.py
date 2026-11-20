@@ -121,6 +121,12 @@ def test_threshold_defaults_to_five_percent_and_is_configurable(market_engine, l
 
 
 def test_weekly_command_runs(market_engine, lake):
+    from hundred_acre.market.factors import FakeReferenceFactorSource
+
     s = make_source({"AAA": "CS"})
-    assert main(["weekly", "--as-of", "2026-11-23"], source=s, engine=market_engine, lake=lake) == 0
+    code = main(
+        ["weekly", "--as-of", "2026-11-23"], source=s, engine=market_engine, lake=lake,
+        factor_source=FakeReferenceFactorSource("junk", "junk"),  # a failed import must not fail the job
+    )
+    assert code == 0
     assert len(s.intraday_calls) == 1

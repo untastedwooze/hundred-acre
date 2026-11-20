@@ -68,3 +68,12 @@ def lake(market_db_url, tmp_path):
     from hundred_acre.market.lake import Lake
 
     return Lake(catalog_url=market_db_url, data_path=tmp_path / "ducklake")
+
+
+@pytest.fixture(autouse=True)
+def no_french_network(monkeypatch):
+    """Tests never reach French's Data Library; a default-source import fails like an unreachable site."""
+    def unreachable(url):
+        raise OSError("network disabled in tests")
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, *a, **k: unreachable(url))

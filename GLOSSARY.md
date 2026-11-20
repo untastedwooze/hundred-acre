@@ -78,6 +78,24 @@ _Avoid_: Metrics, indicators, features
 The curated set of Securities whose Intraday Bars are refreshed nightly. All other Securities in the Universe have their Intraday Bars refreshed weekly.
 _Avoid_: Curated list, portfolio
 
+### Factors
+
+**Factor**:
+A named, systematic source of return shared across many Securities, such as market, size, value, profitability, investment or momentum.
+_Avoid_: Signal, style, anomaly
+
+**Factor Return**:
+A Factor's return over one period, usually the return of a long-short portfolio built to capture it.
+_Avoid_: Factor value, factor level
+
+**Reference Factor Returns**:
+The Factor Returns and risk-free rate published by Kenneth French's Data Library, kept as dated vintages because each publication can restate history. They are the benchmark that Factors built in this app must reproduce.
+_Avoid_: French data, FF factors, benchmark factors
+
+**Factor Exposure**:
+How strongly one Security's returns move with a Factor's returns over an estimation window, together with the alpha and fit left unexplained. A portfolio's exposure is the holdings-weighted sum of its Securities' exposures.
+_Avoid_: Beta (on its own), loading, sensitivity
+
 ### Massive access
 
 **Request Engine**:
