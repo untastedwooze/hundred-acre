@@ -116,3 +116,90 @@ def test_french_source_downloads_and_unzips(monkeypatch):
 
 def test_attribution_names_the_data_library():
     assert "Kenneth R. French" in FRENCH_ATTRIBUTION and "Dartmouth" in FRENCH_ATTRIBUTION
+
+
+FIVE3 = FIVE + "20250203, 2.0, 0.0, 0.0, 0.0, 0.0, 0.5\n"
+MOM3 = MOM + "20250203, 1.0\n"
+
+
+def test_unreachable_source_leaves_latest_vintage_intact(lake):
+    good = import_reference_factor_returns(lake, FakeReferenceFactorSource(FIVE, MOM), now=T1)
+
+    with pytest.raises(ReferenceFactorError):
+        import_reference_factor_returns(lake, FakeReferenceFactorSource(FIVE, MOM, available=False), now=T2)
+
+    df = read_reference_factor_returns(lake)
+    assert set(df["vintage"]) == {good.vintage} and df.height == 2
+
+
+def test_real_source_download_failure_is_a_clear_error(lake):
+    def down(url):
+        raise OSError("network is unreachable")
+
+    with pytest.raises(ReferenceFactorError, match="could not download"):
+        import_reference_factor_returns(lake, FrenchDataLibrarySource(http_get=down), now=T1)
+
+    def not_a_zip(url):
+        return b"<html>moved</html>"
+
+    with pytest.raises(ReferenceFactorError, match="could not download"):
+        import_reference_factor_returns(lake, FrenchDataLibrarySource(http_get=not_a_zip), now=T1)
+    assert read_reference_factor_returns(lake).height == 0
+
+
+def test_restated_vintage_is_complete_and_old_one_unchanged(lake):
+    first = import_reference_factor_returns(lake, FakeReferenceFactorSource(FIVE, MOM), now=T1)
+    before = read_reference_factor_returns(lake, vintage=first.vintage)
+    second = import_reference_factor_returns(lake, FakeReferenceFactorSource(FIVE3, MOM3), now=T2)
+
+    assert second.created and second.rows == 3
+    assert read_reference_factor_returns(lake, vintage=second.vintage).height == 3
+    assert read_reference_factor_returns(lake, vintage=first.vintage).equals(before)
+
+
+def test_vintage_id_is_import_date_and_fingerprint(lake):
+    first = import_reference_factor_returns(lake, FakeReferenceFactorSource(FIVE, MOM), now=T1)
+    other = import_reference_factor_returns(lake, FakeReferenceFactorSource(FIVE3, MOM3), now=T1)
+
+    assert first.vintage.startswith("2026-11-01-") and other.vintage.startswith("2026-11-01-")
+    assert first.vintage != other.vintage
+
+
+def test_reverting_to_older_content_makes_a_new_latest_vintage(lake):
+    a1 = import_reference_factor_returns(lake, FakeReferenceFactorSource(FIVE, MOM), now=T1)
+    import_reference_factor_returns(lake, FakeReferenceFactorSource(FIVE3, MOM3), now=T2)
+    a2 = import_reference_factor_returns(lake, FakeReferenceFactorSource(FIVE, MOM), now=datetime(2026, 11, 15, tzinfo=timezone.utc))
+
+    assert a2.created and a2.vintage != a1.vintage
+    assert read_reference_factor_returns(lake).height == 2
+    assert read_reference_factor_returns(lake, vintage=a2.vintage).height == 2
+
+
+def test_reads_by_vintage_and_date_range(lake):
+    first = import_reference_factor_returns(lake, FakeReferenceFactorSource(FIVE, MOM), now=T1)
+    second = import_reference_factor_returns(lake, FakeReferenceFactorSource(FIVE3, MOM3), now=T2)
+
+    latest = read_reference_factor_returns(lake, start=date(2025, 1, 3))
+    assert latest["trading_date"].to_list() == [date(2025, 1, 3), date(2025, 2, 3)]
+    assert set(latest["vintage"]) == {second.vintage}
+    old = read_reference_factor_returns(lake, vintage=first.vintage, start=date(2025, 1, 3), end=date(2025, 12, 31))
+    assert old["trading_date"].to_list() == [date(2025, 1, 3)] and set(old["vintage"]) == {first.vintage}
+    assert read_reference_factor_returns(lake, end=date(2025, 1, 2))["trading_date"].to_list() == [date(2025, 1, 2)]
+
+
+def test_monthly_read_respects_vintage_and_range(lake):
+    first = import_reference_factor_returns(lake, FakeReferenceFactorSource(FIVE, MOM), now=T1)
+    import_reference_factor_returns(lake, FakeReferenceFactorSource(FIVE3, MOM3), now=T2)
+
+    latest = read_reference_factor_returns(lake, frequency="monthly")
+    assert latest["month"].to_list() == [date(2025, 1, 31), date(2025, 2, 28)]
+    assert latest["mkt_rf"][1] == pytest.approx(0.02)
+    old = read_reference_factor_returns(lake, vintage=first.vintage, frequency="monthly")
+    assert old["month"].to_list() == [date(2025, 1, 31)] and set(old["vintage"]) == {first.vintage}
+    partial = read_reference_factor_returns(lake, start=date(2025, 1, 3), end=date(2025, 1, 31), frequency="monthly")
+    assert partial["mkt_rf"][0] == pytest.approx(-0.01)
+
+
+def test_unknown_frequency_is_rejected(lake):
+    with pytest.raises(ValueError):
+        read_reference_factor_returns(lake, frequency="weekly")
