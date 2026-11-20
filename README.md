@@ -86,3 +86,37 @@ cd backend && uv run python -c "from hundred_acre.market.db import migrate; migr
 | `MARKET_DATA_PATH` | none; directory for the DuckLake Parquet files (used by `Lake.from_env()`) |
 
 Tests use the `market_engine` and `lake` fixtures: a throwaway migrated database and a temp DuckLake directory. DuckDB's `ducklake` and `postgres` extensions are installed on first use (needs network once).
+
+## Request Engine (ADR-0003)
+
+One long-running Request Engine is the only process that calls Massive; all jobs enqueue Requests in Postgres and wait. Everything is configured by environment variables:
+
+| Env var | Default |
+| --- | --- |
+| `MASSIVE_API_KEY` | none (required; never written to rows, files, logs or errors) |
+| `MASSIVE_CALLS_PER_MINUTE` | `5` |
+| `MASSIVE_MAX_CONCURRENT_CALLS` | `1` |
+| `MARKET_RESPONSES_DIR` | none (required; directory for gzip-compressed response bodies, may point at object storage later) |
+| `MARKET_DATABASE_URL` | `postgresql+psycopg://hundred_acre:hundred_acre@localhost:5433/hundred_acre_market` |
+
+Run by hand with `cd backend && uv run market request-engine run` (`--once` serves until the queue is empty and exits; `resume` clears a halt after a 401/403). Only one engine can run at a time.
+
+Response bodies older than 90 days are deleted hourly by the engine and their location is cleared on the Call rows; Request and Call rows are kept forever. The responses directory is not backed up: `ops/backup/parquet-sync.exclude` lists it for the offsite Parquet sync (pass it as `--exclude-from`).
+
+### Install as a systemd user service
+
+```bash
+mkdir -p ~/.config/hundred-acre ~/.config/systemd/user
+cat > ~/.config/hundred-acre/request-engine.env <<'ENV'
+MASSIVE_API_KEY=...
+MARKET_RESPONSES_DIR=/path/to/responses
+# optional: MASSIVE_CALLS_PER_MINUTE, MASSIVE_MAX_CONCURRENT_CALLS, MARKET_DATABASE_URL
+ENV
+chmod 600 ~/.config/hundred-acre/request-engine.env
+cp ops/request-engine/hundred-acre-request-engine.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now hundred-acre-request-engine.service
+loginctl enable-linger "$USER"   # optional: run even when not logged in
+```
+
+The unit uses `Restart=always`; the repo is assumed at `~/honey-tree/hundred-acre` and `uv` at `~/.local/bin/uv` (edit the unit otherwise). This is a stopgap: the app is meant to move fully to Docker Compose, and since all configuration is environment variables, that needs only a backend image and a service entry.

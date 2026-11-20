@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+import time
 from datetime import date, timedelta
 
 from sqlalchemy import Engine, create_engine, text
@@ -12,11 +13,12 @@ from hundred_acre.market.delistings import sync_delistings
 from hundred_acre.market.jobs import nightly_daily_bars, nightly_intraday_bars
 from hundred_acre.market.lake import Lake
 from hundred_acre.market.statistics import refresh_statistics
-from hundred_acre.market.ratelimit import Priority, RateLimiter, ThrottledSource
+from hundred_acre.market.priority import PriorityClass, at_priority
 from hundred_acre.market.reference import security_on, sync_reference
 from hundred_acre.market.source import MarketDataSource, MarketDataUnavailable
 from hundred_acre.market.watchlist import add_to_watchlist, remove_from_watchlist, watchlist
 
+IDLE_POLL_SECONDS = 1.0
 JOBS = ("reference-sync", "nightly", "weekly", "backfill")
 
 
@@ -27,6 +29,12 @@ def build_parser() -> argparse.ArgumentParser:
     for job in JOBS:
         p = sub.add_parser(job, help=f"run the {job} job")
         p.add_argument("--as-of", type=date.fromisoformat, required=True, help="as-of trading date, YYYY-MM-DD")
+    re_ = sub.add_parser("request-engine", help="the Request Engine, the only process that calls Massive")
+    re_sub = re_.add_subparsers(dest="request_engine_command", required=True)
+    re_sub.add_parser("status", help="show engine state, queue depth, Call usage and recent failures (database only)")
+    re_sub.add_parser("resume", help="clear a halt (after fixing the API key or plan); queued Requests then continue")
+    run = re_sub.add_parser("run", help="serve queued Requests (configured by environment variables)")
+    run.add_argument("--once", action="store_true", help="serve until the queue is empty, then exit")
     wl = sub.add_parser("watchlist", help="manage the Watchlist (Securities with nightly Intraday refreshes)")
     wl_sub = wl.add_subparsers(dest="watchlist_command", required=True)
     for name, help_ in (("add", "add a Ticker and backfill its Intraday history"), ("remove", "remove a Ticker")):
@@ -37,29 +45,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _job_priority(job: str) -> Priority:
+def _job_priority(job: str) -> PriorityClass:
+    """The Priority Class a job's Requests carry (`watchlist add` overrides it per step: lookup interactive)."""
     return {
-        "reference-sync": Priority.NIGHTLY_DAILY, "nightly": Priority.NIGHTLY_DAILY,
-        "weekly": Priority.WEEKLY_UNIVERSE, "backfill": Priority.BACKFILL, "watchlist": Priority.BACKFILL,
+        "reference-sync": PriorityClass.NIGHTLY_DAILY, "nightly": PriorityClass.NIGHTLY_DAILY,
+        "weekly": PriorityClass.WEEKLY_UNIVERSE, "backfill": PriorityClass.BACKFILL,
+        "watchlist": PriorityClass.INTERACTIVE,
     }[job]
 
 
 def main(argv: list[str] | None = None, *, source: MarketDataSource | None = None,
-         engine: Engine | None = None, lake: Lake | None = None) -> int:
+         engine: Engine | None = None, lake: Lake | None = None, request_engine=None, clock=time.time) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "migrate":
         migrate()
         return 0
 
+    if args.command == "request-engine":
+        return _request_engine_run(args, engine, request_engine, clock)
+
     if args.command == "watchlist" and args.watchlist_command in ("list", "remove"):
         return _watchlist_offline(args, engine)
 
     try:
-        if source is None:
-            from hundred_acre.market.massive import MassiveSource
-
-            source = ThrottledSource(MassiveSource.from_env(), RateLimiter(), _job_priority(args.command))
         engine = engine or create_engine(market_database_url())
+        if source is None:
+            source = _engine_source(engine)
+        if hasattr(source, "with_priority"):
+            source = source.with_priority(_job_priority(args.command))
         lake = lake or Lake.from_env()
     except RuntimeError as exc:
         print(f"market: {exc}", file=sys.stderr)
@@ -80,7 +93,7 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
             for security_id in sorted(with_actions & set(result.security_ids.values())):
                 rebuild_adjustment_factors(engine, lake, security_id)
             sync_delistings(engine, lake)
-            watchlist_source = source.with_priority(Priority.NIGHTLY_WATCHLIST) if isinstance(source, ThrottledSource) else source
+            watchlist_source = at_priority(source, PriorityClass.NIGHTLY_WATCHLIST)
             nightly_intraday_bars(watchlist_source, args.as_of, engine=engine, lake=lake)
             print(f"loaded watchlist intraday bars for {args.as_of}")
             refresh_statistics(lake)  # incremental: only Securities whose Bars or factors changed
@@ -103,6 +116,49 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
         print(f"market: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def _engine_source(engine: Engine) -> MarketDataSource:
+    """The default source: every call goes through the Request Engine's queue."""
+    import os
+
+    from hundred_acre.market.engine_source import EngineSource
+
+    responses = os.environ.get("MARKET_RESPONSES_DIR")
+    if not responses:
+        raise RuntimeError("MARKET_RESPONSES_DIR is not set")
+    return EngineSource(engine, responses)
+
+
+def _request_engine_run(args: argparse.Namespace, engine: Engine | None, request_engine, clock=time.time) -> int:
+    from hundred_acre.market.request_engine import PRUNE_INTERVAL, RequestEngine, resume
+
+    if args.request_engine_command == "status":
+        from hundred_acre.market.request_engine_status import render_status
+
+        print(render_status(engine or create_engine(market_database_url()), clock()))
+        return 0
+    if args.request_engine_command == "resume":
+        resume(engine or create_engine(market_database_url()))
+        return 0
+    try:
+        if request_engine is None:
+            request_engine = RequestEngine.from_env(engine or create_engine(market_database_url()))
+        request_engine.acquire_lock()
+    except RuntimeError as exc:
+        print(f"market: {exc}", file=sys.stderr)
+        return 1
+    if args.once:
+        request_engine.serve()
+        request_engine.prune_responses()
+        return 0
+    last_prune = float("-inf")
+    while True:
+        if time.time() - last_prune >= PRUNE_INTERVAL:
+            request_engine.prune_responses()
+            last_prune = time.time()
+        request_engine.serve(until=time.time() + IDLE_POLL_SECONDS)
+        time.sleep(IDLE_POLL_SECONDS)
 
 
 def _watchlist_offline(args: argparse.Namespace, engine: Engine | None) -> int:

@@ -5,7 +5,7 @@ from datetime import date
 from sqlalchemy import Engine, text
 
 from hundred_acre.market.lake import Lake
-from hundred_acre.market.ratelimit import Priority, ThrottledSource
+from hundred_acre.market.priority import PriorityClass, at_priority
 from hundred_acre.market.reference import _periods, _security_type, security_on, sync_reference
 from hundred_acre.market.source import MarketDataSource
 
@@ -17,6 +17,7 @@ def add_to_watchlist(source: MarketDataSource, engine: Engine, lake: Lake, ticke
     Raises ValueError if the source knows no such Ticker.
     """
     security_id = security_on(engine, ticker, as_of)
+    source = at_priority(source, PriorityClass.INTERACTIVE)  # a person is waiting on the lookup
     if security_id is None:
         sync_reference(source, engine)
         security_id = security_on(engine, ticker, as_of) or _create_security(source, engine, ticker)
@@ -26,7 +27,7 @@ def add_to_watchlist(source: MarketDataSource, engine: Engine, lake: Lake, ticke
         )
     from hundred_acre.market.jobs import backfill_intraday_bars  # jobs imports this module
 
-    backfill = source.with_priority(Priority.BACKFILL) if isinstance(source, ThrottledSource) else source
+    backfill = at_priority(source, PriorityClass.BACKFILL)
     backfill_intraday_bars(backfill, as_of, engine=engine, lake=lake, security_ids=[security_id])
     return security_id
 
