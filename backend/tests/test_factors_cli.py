@@ -103,3 +103,30 @@ def test_exposures_model_selects_ff3_and_capm(market_engine, lake, world, capsys
     assert run(["factors", "exposures", "AAA", "--model", "ff3"], market_engine, lake) == 0
     out = capsys.readouterr().out
     assert "FF3 exposure" in out and "HML" in out and "RMW" not in out
+
+def test_import_report_includes_range_and_vintage_for_created_and_unchanged(market_engine, lake, capsys):
+    days = trading_days(market_engine)
+    source = factor_source(days, factor_matrix(len(days)))
+    last = max(d for d in days if d <= date(2026, 10, 15))
+
+    run(["factors", "import"], market_engine, lake, factor_source=source)
+    created = capsys.readouterr().out
+    run(["factors", "import"], market_engine, lake, factor_source=source)
+    unchanged = capsys.readouterr().out
+
+    for out in (created, unchanged):
+        assert f"{days[0]} to {last}" in out and "vintage " in out
+    assert "created vintage" in created and "no change" in unchanged and "created" not in unchanged
+
+
+def test_unreachable_import_exits_nonzero_and_keeps_vintage(market_engine, lake, capsys):
+    days = trading_days(market_engine)
+    source = factor_source(days, factor_matrix(len(days)))
+    run(["factors", "import"], market_engine, lake, factor_source=source)
+    capsys.readouterr()
+    source.available = False
+
+    assert run(["factors", "import"], market_engine, lake, factor_source=source) == 1
+    assert "previous vintage kept" in capsys.readouterr().err
+    from hundred_acre.market.factors import read_reference_factor_returns
+    assert read_reference_factor_returns(lake).height > 0
