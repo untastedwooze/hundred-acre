@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# One backend image for migrate, api (and later request-engine / scheduler), built from the locked uv environment.
+# One backend image for migrate, api (request-engine, scheduler), built from the locked uv environment.
 FROM python:3.12-slim-bookworm AS build
 COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /usr/local/bin/uv
 ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy UV_PYTHON_DOWNLOADS=never
@@ -19,6 +19,19 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends postgresql-client-16 \
  && apt-get purge -y gnupg && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
+# supercronic runs the scheduler's crontab. Pinned; the SHA1 is the checksum the release publishes per architecture.
+ARG TARGETARCH
+ARG SUPERCRONIC_VERSION=v0.2.51
+ARG SUPERCRONIC_SHA1_AMD64=1692066e350a88ff4d7d6474fe3c7a6c41ec5e89
+ARG SUPERCRONIC_SHA1_ARM64=9d4c2000493215a1898502b2fc2dada3e8ea8c7a
+RUN case "$TARGETARCH" in \
+      amd64) sha1="$SUPERCRONIC_SHA1_AMD64" ;; \
+      arm64) sha1="$SUPERCRONIC_SHA1_ARM64" ;; \
+      *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+ && curl -fsSLo /usr/local/bin/supercronic "https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-${TARGETARCH}" \
+ && echo "${sha1}  /usr/local/bin/supercronic" | sha1sum -c - \
+ && chmod +x /usr/local/bin/supercronic
 COPY --from=build /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
 # DuckLake needs these extensions; install them now so containers need no network on first use.

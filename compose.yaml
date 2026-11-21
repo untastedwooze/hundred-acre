@@ -69,6 +69,18 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  # Runs the committed crontab (ops/scheduler/crontab) in Eastern time; job output goes to `docker compose logs scheduler`.
+  scheduler:
+    <<: *backend
+    command: ["supercronic", "/etc/hundred-acre/crontab"]
+    restart: unless-stopped
+    volumes:
+      - *data-mount
+      - ./ops/scheduler/crontab:/etc/hundred-acre/crontab:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   web:
     build: ./frontend
     restart: unless-stopped
