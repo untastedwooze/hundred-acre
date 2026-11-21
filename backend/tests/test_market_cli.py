@@ -104,3 +104,61 @@ def test_market_migrate_creates_missing_database_and_is_idempotent():
         with admin.connect() as conn:
             conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
         admin.dispose()
+
+# --- `--as-of latest` -------------------------------------------------------------------------------------------
+
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+ET = ZoneInfo("America/New_York")
+
+
+def _latest_run_loads(market_engine, lake, now_et, trading_days):
+    """Run `nightly --as-of latest` at `now_et`; return the set of days (of `trading_days`) that got Bars."""
+    s = FakeMarketDataSource()
+    s.tickers_ = [TickerRecord("AAPL", "Apple", "CS", "stocks", "BBG001S5N8V8")]
+    for d in trading_days:
+        s.grouped_daily_bars[d] = [BarData("AAPL", 100.0, 110.0, 99.0, 105.0, 1e6, 104.5, 5000)]
+    clock = lambda: now_et.timestamp()  # noqa: E731
+    assert main(["nightly", "--as-of", "latest"], source=s, engine=market_engine, lake=lake, clock=clock) == 0
+    with market_engine.connect() as c:
+        sid = c.execute(text("SELECT security_id FROM securities")).scalar_one()
+    return {d for d in trading_days if read_bars(lake, [sid], d, d).height == 1}
+
+
+FRI, THU, SAT = date(2026, 11, 13), date(2026, 11, 12), date(2026, 11, 14)
+THANKSGIVING, WED = date(2026, 11, 26), date(2026, 11, 25)
+HALF_DAY = date(2026, 11, 27)  # day after Thanksgiving, closes 13:00 ET
+
+
+@pytest.mark.parametrize(
+    "now_et, expected",
+    [
+        (datetime(2026, 11, 13, 21, 0, tzinfo=ET), FRI),
+        (datetime(2026, 11, 13, 19, 0, tzinfo=ET), THU),
+        (datetime(2026, 11, 14, 3, 0, tzinfo=ET), FRI),
+        (datetime(2026, 11, 14, 15, 0, tzinfo=ET), FRI),
+        (datetime(2026, 11, 26, 12, 0, tzinfo=ET), WED),  # market holiday
+        (datetime(2026, 11, 27, 12, 0, tzinfo=ET), WED),  # half day, before its early close
+        (datetime(2026, 11, 27, 14, 0, tzinfo=ET), HALF_DAY),  # half day, after its early close
+    ],
+)
+def test_as_of_latest_resolves_to_last_trading_day_whose_session_has_closed(market_engine, lake, now_et, expected):
+    days = [THU, FRI, WED, HALF_DAY]
+    loaded = _latest_run_loads(market_engine, lake, now_et, days)
+    # The job ran for the resolved date (it may also fill earlier gaps, but never a later day).
+    assert expected in loaded
+    assert max(loaded) == expected
+
+
+def test_explicit_as_of_ignores_the_clock(market_engine, lake):
+    clock = lambda: datetime(2026, 11, 20, 12, 0, tzinfo=ET).timestamp()  # noqa: E731
+    assert main(["nightly", "--as-of", "2026-11-13"], source=src(), engine=market_engine, lake=lake, clock=clock) == 0
+    with market_engine.connect() as c:
+        sid = c.execute(text("SELECT security_id FROM securities")).scalar_one()
+    assert read_bars(lake, [sid], DAY, DAY).height == 1
+
+
+def test_as_of_rejects_garbage(market_engine, lake):
+    with pytest.raises(SystemExit):
+        main(["nightly", "--as-of", "tomorrow"], source=src(), engine=market_engine, lake=lake)

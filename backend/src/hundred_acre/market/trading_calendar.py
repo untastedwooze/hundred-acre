@@ -1,7 +1,8 @@
 """Trading Calendar: which days Bars should exist, generated from exchange_calendars (NYSE by default)."""
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import exchange_calendars as xcals
 import polars as pl
@@ -120,3 +121,26 @@ def count_trading_days(engine: Engine, start: date, end: date, *, calendar_id: s
             text("SELECT count(*) FROM trading_calendar WHERE calendar_id = :c AND trading_date BETWEEN :s AND :e"),
             {"c": calendar_id, "s": start, "e": end},
         ).scalar_one()
+
+
+_ET = ZoneInfo("America/New_York")
+_AFTER_HOURS_CLOSE = time(20, 0)
+
+
+def latest_closed_trading_day(engine: Engine, now: datetime, *, calendar_id: str = NYSE) -> date:
+    """The most recent trading day whose after-hours session has closed at `now` (tz-aware).
+
+    After-hours closes at 20:00 ET, or at the early close on a half day. Generates the calendar for the
+    surrounding weeks first, so it works on a database that has not run a job yet.
+    """
+    today = now.astimezone(_ET).date()
+    generate_calendar(engine, today - timedelta(days=21), today + timedelta(days=1), calendar_id=calendar_id)
+    days = read_trading_calendar(engine, today - timedelta(days=21), today + timedelta(days=1), calendar_id=calendar_id)
+    for row in reversed(list(days.iter_rows(named=True))):
+        if row["half_day"]:
+            closed_at = row["close"]
+        else:
+            closed_at = datetime.combine(row["trading_date"], _AFTER_HOURS_CLOSE, tzinfo=_ET)
+        if closed_at <= now:
+            return row["trading_date"]
+    raise RuntimeError("no closed trading day found in the Trading Calendar")

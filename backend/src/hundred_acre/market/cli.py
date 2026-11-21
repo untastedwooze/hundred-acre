@@ -3,7 +3,7 @@
 import argparse
 import sys
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import Engine, create_engine, text
 
@@ -12,6 +12,7 @@ from hundred_acre.market.db import create_and_migrate, market_database_url
 from hundred_acre.market.delistings import sync_delistings
 from hundred_acre.market.jobs import nightly_daily_bars, nightly_intraday_bars
 from hundred_acre.market.lake import Lake
+from hundred_acre.market.trading_calendar import latest_closed_trading_day
 from hundred_acre.market.statistics import refresh_statistics
 from hundred_acre.market.priority import PriorityClass, at_priority
 from hundred_acre.market.reference import security_on, sync_reference
@@ -22,13 +23,18 @@ IDLE_POLL_SECONDS = 1.0
 JOBS = ("reference-sync", "nightly", "weekly", "backfill")
 
 
+def _as_of(value: str) -> date | str:
+    return value if value == "latest" else date.fromisoformat(value)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="market", description="hundred-acre market data jobs")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("migrate", help="migrate the hundred_acre_market database to the latest revision")
     for job in JOBS:
         p = sub.add_parser(job, help=f"run the {job} job")
-        p.add_argument("--as-of", type=date.fromisoformat, required=True, help="as-of trading date, YYYY-MM-DD")
+        p.add_argument("--as-of", type=_as_of, required=True,
+                       help="as-of trading date, YYYY-MM-DD, or 'latest' (the last trading day whose after-hours session has closed)")
     re_ = sub.add_parser("request-engine", help="the Request Engine, the only process that calls Massive")
     re_sub = re_.add_subparsers(dest="request_engine_command", required=True)
     re_sub.add_parser("status", help="show engine state, queue depth, Call usage and recent failures (database only)")
@@ -74,6 +80,9 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
         if hasattr(source, "with_priority"):
             source = source.with_priority(_job_priority(args.command))
         lake = lake or Lake.from_env()
+        if getattr(args, "as_of", None) == "latest":
+            args.as_of = latest_closed_trading_day(engine, datetime.fromtimestamp(clock(), timezone.utc))
+            print(f"--as-of latest resolved to {args.as_of}")
     except RuntimeError as exc:
         print(f"market: {exc}", file=sys.stderr)
         return 1
