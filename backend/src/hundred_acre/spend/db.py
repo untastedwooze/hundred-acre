@@ -8,8 +8,8 @@ from alembic.config import Config
 
 from hundred_acre.pgdb import create_database_if_missing
 
-DEFAULT_SERVER_URL = "postgresql+psycopg://hundred_acre:hundred_acre@localhost:5432/postgres"
-DEFAULT_SPEND_URL = "postgresql+psycopg://hundred_acre:hundred_acre@localhost:5432/hundred_acre_spend"
+DEFAULT_SERVER_URL = "postgresql+psycopg://hundred_acre:hundred_acre@localhost:5433/postgres"
+DEFAULT_SPEND_URL = "postgresql+psycopg://hundred_acre:hundred_acre@localhost:5433/hundred_acre_spend"
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
