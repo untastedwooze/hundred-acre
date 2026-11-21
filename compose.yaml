@@ -9,6 +9,15 @@ x-backend: &backend
     SPEND_TEST_SERVER_URL: postgresql+psycopg://hundred_acre:${POSTGRES_PASSWORD:-hundred_acre}@postgres:5432/postgres
     MARKET_DATABASE_URL: postgresql+psycopg://hundred_acre:${POSTGRES_PASSWORD:-hundred_acre}@postgres:5432/hundred_acre_market
     MARKET_TEST_SERVER_URL: postgresql+psycopg://hundred_acre:${POSTGRES_PASSWORD:-hundred_acre}@postgres:5432/postgres
+    MARKET_DATA_PATH: ${HUNDRED_ACRE_DATA_DIR:?set HUNDRED_ACRE_DATA_DIR in .env}/lake
+    MARKET_RESPONSES_DIR: ${HUNDRED_ACRE_DATA_DIR:?set HUNDRED_ACRE_DATA_DIR in .env}/responses
+    MASSIVE_API_KEY: ${MASSIVE_API_KEY:-}
+    MASSIVE_CALLS_PER_MINUTE: ${MASSIVE_CALLS_PER_MINUTE:-5}
+    MASSIVE_MAX_CONCURRENT_CALLS: ${MASSIVE_MAX_CONCURRENT_CALLS:-1}
+  # DuckLake records its data path in the catalog, so the host directory is mounted at the SAME absolute path
+  # as on the host; host-side `uv run market ...` then agrees with the containers.
+  volumes:
+    - &data-mount "${HUNDRED_ACRE_DATA_DIR:?set HUNDRED_ACRE_DATA_DIR in .env}:${HUNDRED_ACRE_DATA_DIR}"
 
 services:
   postgres:
@@ -51,6 +60,14 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+
+  request-engine:
+    <<: *backend
+    command: ["market", "request-engine", "run"]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   web:
     build: ./frontend
