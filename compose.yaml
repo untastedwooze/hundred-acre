@@ -1,17 +1,65 @@
-# Dedicated hundred-acre Postgres (ADR-0001, ADR-0002): hosts `hundred_acre_market`
+# hundred-acre: the whole app. Copy .env.example to .env, then `docker compose up -d`.
+# Postgres hosts `hundred_acre_market` (ADR-0002) and `hundred_acre_spend` (ADR-0001) as separate databases.
 name: hundred-acre
-# (market-data reference tables and the DuckLake catalog). Port 5433 avoids clashing with other local Postgres servers.
+
+x-backend: &backend
+  build: ./backend
+  environment: &backend-env
+    SPEND_DATABASE_URL: postgresql+psycopg://hundred_acre:${POSTGRES_PASSWORD:-hundred_acre}@postgres:5432/hundred_acre_spend
+    SPEND_TEST_SERVER_URL: postgresql+psycopg://hundred_acre:${POSTGRES_PASSWORD:-hundred_acre}@postgres:5432/postgres
+    MARKET_DATABASE_URL: postgresql+psycopg://hundred_acre:${POSTGRES_PASSWORD:-hundred_acre}@postgres:5432/hundred_acre_market
+    MARKET_TEST_SERVER_URL: postgresql+psycopg://hundred_acre:${POSTGRES_PASSWORD:-hundred_acre}@postgres:5432/postgres
+
 services:
   postgres:
     image: postgres:16
     restart: unless-stopped
     environment:
       POSTGRES_USER: hundred_acre
-      POSTGRES_PASSWORD: hundred_acre
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hundred_acre}
       POSTGRES_DB: hundred_acre_market
     ports:
-      - "5433:5432"
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - hundred_acre_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hundred_acre -d hundred_acre_market"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *backend
+    command: ["sh", "-c", "spend migrate && market migrate"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *backend
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      GH_TOKEN: ${GH_TOKEN_READ:-}
+      HUNDRED_ACRE_GITHUB_REPO: untastedwooze/hundred-acre
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8100}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   hundred_acre_pg:

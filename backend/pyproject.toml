@@ -28,8 +28,11 @@ packages = ["src/hundred_acre"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-m 'not perf'"
-markers = ["perf: opt-in performance checks, run with `pytest -m perf`"]
+addopts = "-m 'not perf and not compose'"
+markers = [
+    "perf: opt-in performance checks, run with `pytest -m perf`",
+    "compose: opt-in Docker Compose smoke test (builds and starts the whole stack), run with `pytest -m compose`",
+]
 
 [dependency-groups]
 dev = [
