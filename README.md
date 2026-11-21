@@ -1,13 +1,26 @@
 # hundred-acre
 A fullstack, vibe-coded, personal investing application and backtester where the cost to implement every feature is transparent in the web interface.
 
-## Prerequisites
+## Run with Docker Compose
 
-- [uv](https://docs.astral.sh/uv/), Node 20+, and a local Postgres server on `localhost:5432`.
+```bash
+cp .env.example .env        # fill in GH_TOKEN_READ (Issues read on hundred-acre only); optional, see below
+docker compose up -d        # postgres -> migrate (creates and migrates both databases) -> api -> web
+```
+
+The app is at `http://localhost:8100` (`WEB_BIND` / `WEB_PORT` change that; `WEB_BIND=0.0.0.0` opens it to your LAN, and there is no authentication). Postgres is published only on `127.0.0.1:5433` with its password from `POSTGRES_PASSWORD` (it applies when the `hundred_acre_pg` volume is first created). Without `GH_TOKEN_READ` the Spend views report GitHub unavailable.
+
+One-off commands: `docker compose run --rm migrate spend --help`.
+
+Opt-in smoke test of the whole stack (builds images, throwaway project name and ports): `cd backend && uv run pytest -m compose`.
+
+## Prerequisites (host-side dev)
+
+- [uv](https://docs.astral.sh/uv/), Node 20+, and the Compose Postgres running on `localhost:5433` (`docker compose up -d postgres`).
 
 ## Postgres setup (Spend database)
 
-On this machine Postgres runs in the docker container `scrooge-mcduck-db-1` (postgres:16, superuser `app`, no `postgres` role). hundred-acre uses its own role and database, per ADR-0001:
+The Spend database still lives on `scrooge-mcduck-db-1` until the Spend cutover; hundred-acre uses its own role and database, per ADR-0001:
 
 ```bash
 docker exec scrooge-mcduck-db-1 psql -U app -d app \
