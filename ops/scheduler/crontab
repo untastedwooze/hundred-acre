@@ -9,3 +9,6 @@ CRON_TZ=America/New_York
 0 2 * * 2-6 market nightly --as-of latest
 # weekly: 06:00 Sat
 0 6 * * 6 market weekly --as-of latest
+
+# Spend backup (ADR-0001): 02:30 daily. State and failures: see ops/backup/spend-backup.sh.
+30 2 * * * bash /opt/hundred-acre/backup/spend-backup.sh
