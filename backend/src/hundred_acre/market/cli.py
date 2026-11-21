@@ -8,7 +8,7 @@ from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import Engine, create_engine, text
 
 from hundred_acre.market.adjustments import rebuild_adjustment_factors, sync_corporate_actions
-from hundred_acre.market.db import market_database_url, migrate
+from hundred_acre.market.db import create_and_migrate, market_database_url
 from hundred_acre.market.delistings import sync_delistings
 from hundred_acre.market.jobs import nightly_daily_bars, nightly_intraday_bars
 from hundred_acre.market.lake import Lake
@@ -64,7 +64,7 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
          engine: Engine | None = None, lake: Lake | None = None, request_engine=None, clock=time.time) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "migrate":
-        migrate()
+        create_and_migrate()
         return 0
 
     if args.command == "request-engine":

@@ -1,7 +1,7 @@
 from datetime import date
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 
 from hundred_acre.market.cli import main
 from hundred_acre.market.lake import read_bars
@@ -73,6 +73,37 @@ def test_weekly_and_backfill_are_commands(job, market_engine, lake):
     # Their jobs land in tickets #17/#18; until then the command reports unavailability (exit 2).
     assert main([job, "--as-of", "2026-11-13"], source=src(), engine=market_engine, lake=lake) in (0, 2)
 
+
+def test_market_migrate_creates_missing_database_and_is_idempotent():
+    import os
+    import shutil
+    import subprocess
+    import sys
+    import uuid
+    from pathlib import Path
+
+    from sqlalchemy.engine import make_url
+
+    from hundred_acre.market.db import market_server_admin_url
+
+    exe = shutil.which("market", path=str(Path(sys.executable).parent))
+    assert exe, "the `market` console script is not installed"
+    name = f"hundred_acre_market_test_{uuid.uuid4().hex[:12]}"
+    url = make_url(market_server_admin_url()).set(database=name).render_as_string(hide_password=False)
+    admin = create_engine(market_server_admin_url(), isolation_level="AUTOCOMMIT")
+    env = {**os.environ, "MARKET_DATABASE_URL": url}
+    try:
+        for _ in range(2):
+            result = subprocess.run([exe, "migrate"], capture_output=True, text=True, env=env)
+            assert result.returncode == 0, result.stderr
+        engine = create_engine(url)
+        with engine.connect() as conn:
+            assert conn.execute(text("select count(*) from alembic_version")).scalar() == 1
+        engine.dispose()
+    finally:
+        with admin.connect() as conn:
+            conn.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
 
 # --- `--as-of latest` -------------------------------------------------------------------------------------------
 
