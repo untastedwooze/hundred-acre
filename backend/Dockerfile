@@ -21,5 +21,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH"
+# DuckLake needs these extensions; install them now so containers need no network on first use.
+RUN python -c "import duckdb; duckdb.connect().execute('INSTALL ducklake; INSTALL postgres')"
 WORKDIR /app
 CMD ["uvicorn", "hundred_acre.main:app", "--host", "0.0.0.0", "--port", "8000"]
