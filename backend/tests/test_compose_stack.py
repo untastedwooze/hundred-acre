@@ -101,6 +101,25 @@ def test_migrate_exited_zero(stack):
     assert state["State"] == "exited" and state["ExitCode"] == 0
 
 
+def test_migrate_left_both_databases_at_alembic_head(stack):
+    from hundred_acre.market.db import MIGRATIONS_DIR as MARKET_MIGRATIONS
+    from hundred_acre.spend.db import MIGRATIONS_DIR as SPEND_MIGRATIONS
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    from sqlalchemy import create_engine, text
+
+    for name, migrations in (("hundred_acre_spend", SPEND_MIGRATIONS), ("hundred_acre_market", MARKET_MIGRATIONS)):
+        config = Config()
+        config.set_main_option("script_location", str(migrations))
+        head = ScriptDirectory.from_config(config).get_current_head()
+        engine = create_engine(f"postgresql+psycopg://hundred_acre:smoke_test@127.0.0.1:{stack.env['POSTGRES_PORT']}/{name}")
+        try:
+            with engine.connect() as conn:
+                assert conn.execute(text("select version_num from alembic_version")).scalars().all() == [head], name
+        finally:
+            engine.dispose()
+
+
 def test_spend_views_report_github_unavailable_without_a_token(stack):
     status, body = stack.get("/api/spend/features/49")
     assert status == 200

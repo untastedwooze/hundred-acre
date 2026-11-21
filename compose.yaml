@@ -32,7 +32,8 @@ services:
     volumes:
       - hundred_acre_pg:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U hundred_acre -d hundred_acre_market"]
+      # Over TCP: the Unix socket also answers on the temporary init-time server of a fresh volume, which then restarts.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U hundred_acre -d hundred_acre_market"]
       interval: 2s
       timeout: 3s
       retries: 30

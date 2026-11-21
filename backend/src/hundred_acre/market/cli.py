@@ -12,19 +12,20 @@ from hundred_acre.market.db import create_and_migrate, market_database_url
 from hundred_acre.market.delistings import sync_delistings
 from hundred_acre.market.jobs import nightly_daily_bars, nightly_intraday_bars
 from hundred_acre.market.lake import Lake
-from hundred_acre.market.trading_calendar import latest_closed_trading_day
-from hundred_acre.market.statistics import refresh_statistics
 from hundred_acre.market.priority import PriorityClass, at_priority
 from hundred_acre.market.reference import security_on, sync_reference
 from hundred_acre.market.source import MarketDataSource, MarketDataUnavailable
+from hundred_acre.market.statistics import refresh_statistics
+from hundred_acre.market.trading_calendar import latest_closed_trading_day
 from hundred_acre.market.watchlist import add_to_watchlist, remove_from_watchlist, watchlist
 
 IDLE_POLL_SECONDS = 1.0
 JOBS = ("reference-sync", "nightly", "weekly", "backfill")
 
 
-def _as_of(value: str) -> date | str:
-    return value if value == "latest" else date.fromisoformat(value)
+def _as_of(value: str) -> date | None:
+    """Parse `--as-of`: a date, or None for 'latest' (resolved once in `main`, which has the engine and clock)."""
+    return None if value == "latest" else date.fromisoformat(value)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -80,7 +81,7 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
         if hasattr(source, "with_priority"):
             source = source.with_priority(_job_priority(args.command))
         lake = lake or Lake.from_env()
-        if getattr(args, "as_of", None) == "latest":
+        if args.command in JOBS and args.as_of is None:
             args.as_of = latest_closed_trading_day(engine, datetime.fromtimestamp(clock(), timezone.utc))
             print(f"--as-of latest resolved to {args.as_of}")
     except RuntimeError as exc:

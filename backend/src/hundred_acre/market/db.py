@@ -9,7 +9,7 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 
-from hundred_acre.pgdb import create_database_if_missing
+from hundred_acre.pgdb import create_and_migrate as _create_and_migrate
 
 DEFAULT_SERVER_URL = "postgresql+psycopg://hundred_acre:hundred_acre@localhost:5433/postgres"
 DEFAULT_MARKET_URL = "postgresql+psycopg://hundred_acre:hundred_acre@localhost:5433/hundred_acre_market"
@@ -39,6 +39,4 @@ def migrate(url: str | None = None, revision: str = "head") -> None:
 
 def create_and_migrate(url: str | None = None) -> None:
     """Create the target database if it is missing, then upgrade it to head."""
-    url = url or market_database_url()
-    create_database_if_missing(url)
-    migrate(url)
+    _create_and_migrate(url or market_database_url(), migrate)
