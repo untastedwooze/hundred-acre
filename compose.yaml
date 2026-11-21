@@ -74,9 +74,24 @@ services:
     <<: *backend
     command: ["supercronic", "/etc/hundred-acre/crontab"]
     restart: unless-stopped
+    environment:
+      <<: *backend-env
+      BACKUP_STATE_DIR: /var/lib/hundred-acre-backup
+      BACKUP_REPO_URL: ${BACKUP_REPO_URL:-}
+      BACKUP_GH_TOKEN: ${BACKUP_GH_TOKEN:-}
+      BACKUP_ALERT_URL: ${BACKUP_ALERT_URL:-}
     volumes:
       - *data-mount
       - ./ops/scheduler/crontab:/etc/hundred-acre/crontab:ro
+      - ./ops/backup:/opt/hundred-acre/backup:ro
+      - hundred_acre_backup_state:/var/lib/hundred-acre-backup
+    # Unhealthy after a failed Spend backup or 36h without a success (ops/backup/spend-backup-status.sh).
+    healthcheck:
+      test: ["CMD", "bash", "/opt/hundred-acre/backup/spend-backup-status.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 1
+      start_period: 5s
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -92,3 +107,4 @@ services:
 
 volumes:
   hundred_acre_pg:
+  hundred_acre_backup_state:

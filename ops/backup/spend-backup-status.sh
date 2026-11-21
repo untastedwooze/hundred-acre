@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Prints backup health; exit 1 if the last run failed or there was no success in MAX_AGE_HOURS (default 36).
-STATE_DIR="${BACKUP_STATE_DIR:-$HOME/.local/state/hundred-acre-backup}"
+STATE_DIR="${BACKUP_STATE_DIR:-/var/lib/hundred-acre-backup}"
 MAX_AGE_HOURS="${MAX_AGE_HOURS:-36}"
 if [ -f "$STATE_DIR/FAILED" ]; then echo "FAILED:"; cat "$STATE_DIR/FAILED"; exit 1; fi
 if [ ! -f "$STATE_DIR/last-success" ]; then echo "NO SUCCESSFUL BACKUP YET"; exit 1; fi

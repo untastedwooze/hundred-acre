@@ -127,6 +127,17 @@ def test_scheduler_is_running_after_migrate(stack):
     assert stack.container_state("scheduler")["State"] == "running"
 
 
+def test_scheduler_is_healthy_once_a_successful_backup_is_recorded(stack):
+    # seed the backup state volume the way a successful run leaves it, then the healthcheck should pass
+    seed = stack.compose("run", "--rm", "-T", "--no-deps", "scheduler", "sh", "-c",
+                         "rm -f $BACKUP_STATE_DIR/FAILED; date -Is > $BACKUP_STATE_DIR/last-success", check=False)
+    assert seed.returncode == 0, seed.stdout + seed.stderr
+    deadline = time.time() + 90
+    while time.time() < deadline and stack.container_state("scheduler").get("Health") != "healthy":
+        time.sleep(2)
+    assert stack.container_state("scheduler").get("Health") == "healthy", stack.compose("ps", "-a", check=False).stdout
+
+
 def test_status_command_reports_the_running_engine(stack):
     deadline = time.time() + 60
     while True:
