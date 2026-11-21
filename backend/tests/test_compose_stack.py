@@ -117,6 +117,16 @@ def test_request_engine_is_running_after_migrate(stack):
     assert stack.container_state("request-engine")["State"] == "running"
 
 
+def test_scheduler_is_running_after_migrate(stack):
+    deadline = time.time() + 60
+    while time.time() < deadline and stack.container_state("scheduler")["State"] != "running":
+        time.sleep(1)
+    state = stack.container_state("scheduler")
+    assert state["State"] == "running", stack.compose("logs", "scheduler", check=False).stdout
+    time.sleep(5)  # it stays running rather than crash-looping
+    assert stack.container_state("scheduler")["State"] == "running"
+
+
 def test_status_command_reports_the_running_engine(stack):
     deadline = time.time() + 60
     while True:

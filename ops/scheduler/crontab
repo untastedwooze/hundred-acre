@@ -1,0 +1,11 @@
+# Market jobs, run by supercronic in the `scheduler` service. All times are US Eastern (follows DST).
+# Every job goes through the Request Engine, whose Priority Classes order nightly ahead of weekly (ADR-0003).
+# `backfill` is deliberately not scheduled: run it by hand with `docker compose run --rm`.
+CRON_TZ=America/New_York
+
+# reference-sync: 01:00 Tue-Sat
+0 1 * * 2-6 market reference-sync --as-of latest
+# nightly: 02:00 Tue-Sat
+0 2 * * 2-6 market nightly --as-of latest
+# weekly: 06:00 Sat
+0 6 * * 6 market weekly --as-of latest
