@@ -135,6 +135,8 @@ The `postgres` service hosts the Market database (`hundred_acre_market`, role `h
 | --- | --- |
 | `MARKET_DATABASE_URL` | `postgresql+psycopg://hundred_acre:hundred_acre@localhost:5433/hundred_acre_market` (also the DuckLake catalog) |
 | `MARKET_TEST_SERVER_URL` | `postgresql+psycopg://hundred_acre:hundred_acre@localhost:5433/postgres` (creates/drops throwaway test DBs) |
+| `SPEND_DATABASE_URL` | `postgresql+psycopg://hundred_acre:hundred_acre@localhost:5433/hundred_acre_spend` (Spend, ADR-0001; same server, separate database) |
+| `SPEND_TEST_SERVER_URL` | `postgresql+psycopg://hundred_acre:hundred_acre@localhost:5433/postgres` (creates/drops throwaway Spend test DBs) |
 | `MARKET_DATA_PATH` | none; directory for the DuckLake Parquet files (used by `Lake.from_env()`) |
 
 Tests use the `market_engine` and `lake` fixtures: a throwaway migrated database and a temp DuckLake directory. DuckDB's `ducklake` and `postgres` extensions are installed on first use (needs network once).
