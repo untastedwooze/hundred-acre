@@ -6,8 +6,10 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 
-DEFAULT_SERVER_URL = "postgresql+psycopg://hundred_acre:hundred_acre@localhost:5432/postgres"
-DEFAULT_SPEND_URL = "postgresql+psycopg://hundred_acre:hundred_acre@localhost:5432/hundred_acre_spend"
+from hundred_acre.pgdb import create_and_migrate as _create_and_migrate
+
+DEFAULT_SERVER_URL = "postgresql+psycopg://hundred_acre:hundred_acre@localhost:5433/postgres"
+DEFAULT_SPEND_URL = "postgresql+psycopg://hundred_acre:hundred_acre@localhost:5433/hundred_acre_spend"
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
@@ -30,3 +32,8 @@ def alembic_config(url: str) -> Config:
 
 def migrate(url: str | None = None, revision: str = "head") -> None:
     command.upgrade(alembic_config(url or spend_database_url()), revision)
+
+
+def create_and_migrate(url: str | None = None) -> None:
+    """Create the target database if it is missing, then upgrade it to head."""
+    _create_and_migrate(url or spend_database_url(), migrate)

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from sqlalchemy import create_engine
 
-from hundred_acre.spend.db import migrate, spend_database_url
+from hundred_acre.spend.db import create_and_migrate, spend_database_url
 from hundred_acre.spend.autorecord import record_from_hook, sweep
 from hundred_acre.spend.features import FeatureSourceUnavailable, GhFeatureSource
 from hundred_acre.spend.ledger import add_price, record
@@ -69,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "migrate":
-        migrate()
+        create_and_migrate()
         return 0
     if args.command == "record":
         engine = create_engine(spend_database_url())

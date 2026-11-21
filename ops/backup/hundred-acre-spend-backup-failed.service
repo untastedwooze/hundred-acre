@@ -1,6 +1,0 @@
-[Unit]
-Description=Notify that the hundred_acre_spend backup failed
-
-[Service]
-Type=oneshot
-ExecStart=%h/honey-tree/hundred-acre/ops/backup/spend-backup-failed.sh

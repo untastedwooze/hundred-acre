@@ -1,17 +1,111 @@
-# Dedicated hundred-acre Postgres (ADR-0001, ADR-0002): hosts `hundred_acre_market`
+# hundred-acre: the whole app. Copy .env.example to .env, then `docker compose up -d`.
+# Postgres hosts `hundred_acre_market` (ADR-0002) and `hundred_acre_spend` (ADR-0001) as separate databases.
 name: hundred-acre
-# (market-data reference tables and the DuckLake catalog). Port 5433 avoids clashing with other local Postgres servers.
+
+x-backend: &backend
+  build: ./backend
+  environment: &backend-env
+    SPEND_DATABASE_URL: postgresql+psycopg://hundred_acre:${POSTGRES_PASSWORD:-hundred_acre}@postgres:5432/hundred_acre_spend
+    SPEND_TEST_SERVER_URL: postgresql+psycopg://hundred_acre:${POSTGRES_PASSWORD:-hundred_acre}@postgres:5432/postgres
+    MARKET_DATABASE_URL: postgresql+psycopg://hundred_acre:${POSTGRES_PASSWORD:-hundred_acre}@postgres:5432/hundred_acre_market
+    MARKET_TEST_SERVER_URL: postgresql+psycopg://hundred_acre:${POSTGRES_PASSWORD:-hundred_acre}@postgres:5432/postgres
+    MARKET_DATA_PATH: ${HUNDRED_ACRE_DATA_DIR:?set HUNDRED_ACRE_DATA_DIR in .env}/lake
+    MARKET_RESPONSES_DIR: ${HUNDRED_ACRE_DATA_DIR:?set HUNDRED_ACRE_DATA_DIR in .env}/responses
+    MASSIVE_API_KEY: ${MASSIVE_API_KEY:-}
+    MASSIVE_CALLS_PER_MINUTE: ${MASSIVE_CALLS_PER_MINUTE:-5}
+    MASSIVE_MAX_CONCURRENT_CALLS: ${MASSIVE_MAX_CONCURRENT_CALLS:-1}
+  # DuckLake records its data path in the catalog, so the host directory is mounted at the SAME absolute path
+  # as on the host; host-side `uv run market ...` then agrees with the containers.
+  volumes:
+    - &data-mount "${HUNDRED_ACRE_DATA_DIR:?set HUNDRED_ACRE_DATA_DIR in .env}:${HUNDRED_ACRE_DATA_DIR}"
+
 services:
   postgres:
     image: postgres:16
     restart: unless-stopped
     environment:
       POSTGRES_USER: hundred_acre
-      POSTGRES_PASSWORD: hundred_acre
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-hundred_acre}
       POSTGRES_DB: hundred_acre_market
     ports:
-      - "5433:5432"
+      - "${POSTGRES_BIND:-127.0.0.1}:${POSTGRES_PORT:-5433}:5432"
     volumes:
       - hundred_acre_pg:/var/lib/postgresql/data
+    healthcheck:
+      # Over TCP: the Unix socket also answers on the temporary init-time server of a fresh volume, which then restarts.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U hundred_acre -d hundred_acre_market"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  migrate:
+    <<: *backend
+    command: ["sh", "-c", "spend migrate && market migrate"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *backend
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      GH_TOKEN: ${GH_TOKEN_READ:-}
+      HUNDRED_ACRE_GITHUB_REPO: untastedwooze/hundred-acre
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  request-engine:
+    <<: *backend
+    command: ["market", "request-engine", "run"]
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  # Runs the committed crontab (ops/scheduler/crontab) in Eastern time; job output goes to `docker compose logs scheduler`.
+  scheduler:
+    <<: *backend
+    command: ["supercronic", "/etc/hundred-acre/crontab"]
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+      BACKUP_STATE_DIR: /var/lib/hundred-acre-backup
+      BACKUP_REPO_URL: ${BACKUP_REPO_URL:-}
+      BACKUP_GH_TOKEN: ${BACKUP_GH_TOKEN:-}
+      BACKUP_ALERT_URL: ${BACKUP_ALERT_URL:-}
+    volumes:
+      - *data-mount
+      - ./ops/scheduler/crontab:/etc/hundred-acre/crontab:ro
+      - ./ops/backup:/opt/hundred-acre/backup:ro
+      - hundred_acre_backup_state:/var/lib/hundred-acre-backup
+    # Unhealthy after a failed Spend backup or 36h without a success (ops/backup/spend-backup-status.sh).
+    healthcheck:
+      test: ["CMD", "bash", "/opt/hundred-acre/backup/spend-backup-status.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 1
+      start_period: 5s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8100}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   hundred_acre_pg:
+  hundred_acre_backup_state:
