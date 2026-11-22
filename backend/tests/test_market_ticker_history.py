@@ -91,3 +91,14 @@ def test_resync_is_idempotent(market_engine, lake):
 
     assert a == b
     assert security_on(market_engine, "FB", date(2022, 10, 27)) == a["META"]
+
+
+def test_sync_reference_creates_single_period_for_ticker_without_events(market_engine):
+    from hundred_acre.market.reference import sync_reference
+
+    source = FakeMarketDataSource()  # no events recorded: what a 404 on /events is normalised to
+    source.tickers_ = [TickerRecord("WARR", "Warrant", "WARRANT", "stocks", "FIGI-W", list_date=date(2020, 1, 2)),
+                       TickerRecord("OK", "Ok", "CS", "stocks", "FIGI-OK")]
+    sync_reference(source, market_engine)
+    assert security_on(market_engine, "WARR", date(2021, 1, 4)) is not None
+    assert security_on(market_engine, "OK", date(2021, 1, 4)) is not None

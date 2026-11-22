@@ -36,7 +36,7 @@ def test_grouped_daily_requests_unadjusted_and_parses_bars():
 def test_tickers_follow_pagination():
     t = FakeTransport({"/v3/reference/tickers": [
         {"results": [{"ticker": "A", "name": "A Co", "type": "CS", "market": "stocks",
-                      "share_class_figi": "F1", "active": True}], "next_cursor": "c2"},
+                      "share_class_figi": "F1", "active": True}], "next_url": "https://api.massive.com/v3/x?cursor=c2&limit=1000"},
         {"results": [{"ticker": "B", "market": "stocks", "active": True}]},
         {"results": [{"ticker": "C", "market": "stocks", "active": False}]},
     ]})
@@ -64,10 +64,10 @@ def test_missing_key_is_a_clear_error(monkeypatch):
 
 def test_call_makes_exactly_one_call_and_returns_body_and_next_cursor():
     t = FakeTransport({"/v3/reference/splits": [
-        {"results": [{"ticker": "A"}], "next_cursor": "c2"}, {"results": []}]})
+        {"results": [{"ticker": "A"}], "next_url": "https://api.massive.com/v3/x?cursor=c2&limit=1000"}, {"results": []}]})
     page = MassiveSource(KEY, transport=t).call("/v3/reference/splits", {"limit": 1000})
     assert len(t.calls) == 1
-    assert page.body == {"results": [{"ticker": "A"}], "next_cursor": "c2"}
+    assert page.body == {"results": [{"ticker": "A"}], "next_url": "https://api.massive.com/v3/x?cursor=c2&limit=1000"}
     assert page.next_cursor == "c2"
     last = MassiveSource(KEY, transport=FakeTransport({"/p": {"results": []}})).call("/p")
     assert last.next_cursor is None
@@ -105,3 +105,19 @@ def test_parsing_works_on_raw_pages_without_http():
         {"date": "2026-12-25", "exchange": "NYSE", "name": "Xmas", "status": "closed"}]}])
     assert hol[0].name == "Xmas"
     assert m.parse_market_holidays([[{"date": "2026-12-25"}]])[0].date == date(2026, 12, 25)
+
+
+@pytest.mark.parametrize("body,expected", [
+    ({"results": []}, None),
+    ({"next_url": "https://api.massive.com/v3/x?limit=1000"}, None),
+    ({"next_url": "https://api.massive.com/v3/x?active=true&cursor=abc&limit=1000"}, "abc"),
+])
+def test_next_cursor_comes_from_next_url(body, expected):
+    page = MassiveSource(KEY, transport=FakeTransport({"/p": body})).call("/p")
+    assert page.next_cursor == expected
+
+
+def test_ticker_events_404_means_no_events():
+    from hundred_acre.market.massive import MassiveError
+    t = FakeTransport({"/vX/reference/tickers/AAPw/events": MassiveError("not found", 404)})
+    assert MassiveSource(KEY, transport=t).ticker_events("AAPw") == []

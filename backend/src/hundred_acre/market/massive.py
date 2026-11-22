@@ -179,6 +179,14 @@ def market_holidays_request() -> tuple[str, dict]:
     return "/v1/marketstatus/upcoming", {}
 
 
+def _next_cursor(body: object) -> str | None:
+    """The cursor in a response's top-level `next_url`, or None when there is no further page."""
+    url = body.get("next_url") if isinstance(body, dict) else None
+    if not isinstance(url, str):
+        return None
+    return urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("cursor", [None])[0]
+
+
 class MassiveSource:
     def __init__(self, api_key: str, *, transport: Transport = _http_transport):
         self._api_key = api_key
@@ -203,7 +211,7 @@ class MassiveSource:
             unavailable = MarketDataUnavailable(str(exc).replace(self._api_key, "***"))
             unavailable.status = exc.status  # type: ignore[attr-defined]
             raise unavailable from None
-        return Page(body, body.get("next_cursor") if isinstance(body, dict) else None)
+        return Page(body, _next_cursor(body))
 
     def _get(self, path: str, params: dict | None = None) -> dict:
         return self.call(path, params).body
@@ -237,7 +245,12 @@ class MassiveSource:
         return out
 
     def ticker_events(self, ticker: str) -> list[TickerEvent]:
-        return parse_ticker_events([self._get(*ticker_events_request(ticker))], ticker)
+        try:
+            return parse_ticker_events([self._get(*ticker_events_request(ticker))], ticker)
+        except MarketDataUnavailable as exc:
+            if getattr(exc, "status", None) == 404:  # no events record for this ticker
+                return []
+            raise
 
     def splits(self, since: date) -> list[Split]:
         return parse_splits(self._paged(*splits_request(since)))
