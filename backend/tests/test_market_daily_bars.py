@@ -9,7 +9,7 @@ from hundred_acre.market.source import BarData, FakeMarketDataSource, TickerReco
 DAY = date(2026, 11, 13)
 NEXT = date(2026, 11, 16)
 ALL_COLUMNS = [
-    "security_id", "trading_date", "open", "high", "low", "close", "volume", "vwap", "trade_count", "source", "fetched_at",
+    "security_id", "trading_date", "ticker", "open", "high", "low", "close", "volume", "vwap", "trade_count", "source", "fetched_at",
 ]
 
 
@@ -112,3 +112,25 @@ def test_prices_and_volume_are_64_bit_floats_and_files_split_by_year(market_engi
     assert df.columns == ALL_COLUMNS
     parquet_dirs = {p.parent.name for p in lake.data_path.rglob("*.parquet")}
     assert parquet_dirs >= {"year=2025", "year=2026"}
+
+
+def test_daily_bar_records_the_ticker_it_was_fetched_under(market_engine, lake):
+    result = load_daily_bars(aapl_source(), DAY, engine=market_engine, lake=lake)
+
+    df = read_bars(lake, [result.security_ids["AAPL"]], DAY, DAY, columns=["ticker"])
+
+    assert df["ticker"].to_list() == ["AAPL"]
+
+
+def test_two_tickers_of_one_security_on_one_day_make_one_daily_bar(market_engine, lake):
+    source = aapl_source()
+    source.tickers_.append(TickerRecord("AAPL.OLD", "Apple", "CS", "stocks", "BBG001S5N8V8"))
+    source.grouped_daily_bars[DAY].append(BarData("AAPL.OLD", 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1))
+
+    result = load_daily_bars(source, DAY, engine=market_engine, lake=lake)
+    load_daily_bars(source, DAY, engine=market_engine, lake=lake)  # a re-run (and release) must not add the other
+
+    df = read_bars(lake, [result.security_ids["AAPL"]], DAY, DAY, columns=["ticker", "close"])
+    assert df.height == 1
+    assert df["ticker"][0] in {"AAPL", "AAPL.OLD"}
+    assert result.bars_written == 1
