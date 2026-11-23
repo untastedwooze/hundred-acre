@@ -121,3 +121,13 @@ def test_ticker_events_404_means_no_events():
     from hundred_acre.market.massive import MassiveError
     t = FakeTransport({"/vX/reference/tickers/AAPw/events": MassiveError("not found", 404)})
     assert MassiveSource(KEY, transport=t).ticker_events("AAPw") == []
+
+
+def test_ticker_lookup_asks_for_one_ticker_across_all_markets_and_states():
+    from hundred_acre.market.massive import ticker_lookup_request
+    path, params = ticker_lookup_request("NSRGY")
+    assert path == "/v3/reference/tickers"
+    assert params == {"ticker": "NSRGY"}
+    t = FakeTransport({path: {"results": [{"ticker": "NSRGY", "market": "otc", "active": False}]}})
+    (rec,) = MassiveSource(KEY, transport=t).lookup_ticker("NSRGY")
+    assert (rec.ticker, rec.market, rec.active) == ("NSRGY", "otc", False)
