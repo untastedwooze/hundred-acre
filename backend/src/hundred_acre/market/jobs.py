@@ -22,7 +22,7 @@ from hundred_acre.market.quarantine import quarantine_bars, release_quarantine
 from hundred_acre.market.reference import list_ticker_periods, security_on, securities_expected_to_trade, sync_reference
 from hundred_acre.market.priority import PriorityClass, at_priority
 from hundred_acre.market.sessions import assign_sessions
-from hundred_acre.market.source import MarketDataSource, MarketDataUnavailable
+from hundred_acre.market.source import BarData, MarketDataSource, MarketDataUnavailable
 from hundred_acre.market.statistics import refresh_statistics
 from hundred_acre.market.ticker_history import fetch_ticker_history
 from hundred_acre.market.trading_calendar import (
@@ -39,7 +39,7 @@ log = logging.getLogger(__name__)
 class LoadResult:
     trading_date: date
     bars_written: int
-    security_ids: dict[str, int] = field(default_factory=dict)  # ticker -> Security id, for the Bars written
+    security_ids: dict[str, int] = field(default_factory=dict)  # ticker -> Security id, for every Ticker that matched a Security
     unmatched_tickers: list[str] = field(default_factory=list)  # Tickers with no Security; their Bars are quarantined
     released_bars: int = 0  # Quarantined Bars (any date) released into the Daily Bars this run
     calendar_disagreements: list[CalendarDisagreement] = field(default_factory=list)  # Trading Calendar vs Massive
@@ -60,6 +60,15 @@ def refresh_calendar(source: MarketDataSource, engine: Engine, start: date, end:
     return found
 
 
+def _period_ranks(engine: Engine, on: date) -> dict[tuple[int, str], tuple]:
+    """(Security id, Ticker) -> sort key of the Ticker period covering `on`: later start wins, then earlier Ticker name."""
+    return {
+        (security_id, ticker): (valid_from.toordinal() if valid_from else 0, tuple(-ord(c) for c in ticker))
+        for ticker, security_id, valid_from, valid_to in list_ticker_periods(engine)
+        if (valid_from is None or valid_from <= on) and (valid_to is None or valid_to >= on)
+    }
+
+
 def load_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> LoadResult:
     """Load `as_of`'s Unadjusted grouped-daily Bars (OTC excluded) into the lake.
 
@@ -76,15 +85,25 @@ def load_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine, la
             for security_id in expected:
                 record_coverage(conn, security_id, "1d", [as_of], status="failed", fetched_at=fetched_at)
         raise
-    rows, matched, unmatched, quarantined = [], {}, [], []
+    matched, unmatched, quarantined = {}, [], []
+    kept: dict[int, tuple[tuple, BarData]] = {}  # Security id -> (rank, Bar) kept so far: one Bar per Security per day
+    ranks = _period_ranks(engine, as_of)
     for b in bars:
         security_id = security_on(engine, b.ticker, as_of)
         if security_id is None:
             unmatched.append(b.ticker)
             quarantined.append((b, as_of))
             continue
+        rank = ranks.get((security_id, b.ticker), (0, ()))
+        if security_id in kept:
+            loser = b if rank <= kept[security_id][0] else kept[security_id][1]
+            quarantined.append((loser, as_of))
+            if loser is not b:
+                kept[security_id] = (rank, b)
+        else:
+            kept[security_id] = (rank, b)
         matched[b.ticker] = security_id
-        rows.append(bar_row(security_id, as_of, b, source=SOURCE_NAME, fetched_at=fetched_at))
+    rows = [bar_row(sid, as_of, b, source=SOURCE_NAME, fetched_at=fetched_at) for sid, (_, b) in kept.items()]
     write_bars(lake, pl.DataFrame(rows, schema=_SCHEMA), as_of)
     answered = set(matched.values())
     with engine.begin() as conn:  # Bars first, then Coverage, so Coverage never claims Bars that were not written
@@ -108,7 +127,7 @@ def _years_back(day: date, years: int) -> date:
 def _backfill(
     engine: Engine, lake: Lake, interval: str, start: date, as_of: date, periods: list[tuple], *,
     fetch: Callable[[str, list[date]], list],
-    build: Callable[[int, list[date], list, datetime], tuple[pl.DataFrame, dict[date, int]]],
+    build: Callable[[int, list[date], list, datetime, str], tuple[pl.DataFrame, dict[date, int]]],
     replace: Callable[[Lake, pl.DataFrame, list[int], list[date]], None],
 ) -> None:
     """Shared skeleton of the per-Ticker backfills.
@@ -133,7 +152,7 @@ def _backfill(
             with engine.begin() as conn:
                 record_coverage(conn, security_id, interval, missing, status="failed", fetched_at=fetched_at)
             continue
-        frame, counts = build(security_id, missing, fetched, fetched_at)
+        frame, counts = build(security_id, missing, fetched, fetched_at, ticker)
         replace(lake, frame, [security_id], missing)
         with engine.begin() as conn:
             record_coverage(
@@ -157,9 +176,10 @@ def backfill_daily_bars(
     start = since or _years_back(as_of, years)
     refresh_calendar(source, engine, start, date(as_of.year + 1, 12, 31))
 
-    def build(security_id, missing, fetched, fetched_at):
+    def build(security_id, missing, fetched, fetched_at, ticker):
         by_day = {d: b for d, b in fetched if d in set(missing)}
-        rows = [bar_row(security_id, d, b, source=SOURCE_NAME, fetched_at=fetched_at) for d, b in sorted(by_day.items())]
+        rows = [bar_row(security_id, d, b, source=SOURCE_NAME, fetched_at=fetched_at, ticker=ticker)
+            for d, b in sorted(by_day.items())]
         return pl.DataFrame(rows, schema=_SCHEMA), {d: 1 for d in by_day}
 
     _backfill(
@@ -207,11 +227,11 @@ def backfill_intraday_bars(
     def fetch(ticker, missing):  # overnight Bars lead into a trading day from the evening before, up to a long weekend earlier
         return source.intraday_aggregates(ticker, missing[0] - timedelta(days=4), missing[-1], adjusted=False)
 
-    def build(security_id, missing, fetched, fetched_at):
+    def build(security_id, missing, fetched, fetched_at, ticker):
         wanted = set(missing)
         tagged = assign_sessions([t for t, _ in fetched], calendar)
         rows = [
-            bar_row(security_id, tag[0], b, source=SOURCE_NAME, fetched_at=fetched_at, bar_start=t, trading_session=tag[1])
+            bar_row(security_id, tag[0], b, source=SOURCE_NAME, fetched_at=fetched_at, ticker=ticker, bar_start=t, trading_session=tag[1])
             for (t, b), tag in zip(fetched, tagged)
             if tag is not None and tag[0] in wanted
         ]
