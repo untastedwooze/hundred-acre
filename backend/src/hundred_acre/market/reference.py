@@ -1,11 +1,15 @@
 """Reference sync: Securities (one per share-class FIGI), Issuers (by CIK) and dated Ticker periods."""
 
+import json
+import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
 
 from sqlalchemy import Engine, text
 
 from hundred_acre.market.source import MarketDataSource, TickerEvent, TickerRecord
+
+log = logging.getLogger(__name__)
 
 _TYPES = {
     "CS": "common_stock", "ETF": "etf", "ETN": "etf", "ETV": "etf", "ADRC": "adr", "ADRP": "adr", "ADRR": "adr",
@@ -69,12 +73,82 @@ def _one_per_delisting(recs: list[TickerRecord]) -> list[TickerRecord]:
     return kept + [r for r in recs if r.active]
 
 
+def records_json(recs: list[TickerRecord]) -> list[dict]:
+    """The Reference Records `(ticker, active, delisted_utc)` of one Security, in a canonical order, for storage and comparison."""
+    items = [{"ticker": r.ticker, "active": r.active, "delisted_utc": r.delisted_date.isoformat() if r.delisted_date else None}
+             for r in recs]
+    return sorted(items, key=lambda i: (i["ticker"], i["delisted_utc"] or "", i["active"]))
+
+
+def _records_from_json(figi: str, items: list[dict]) -> list[TickerRecord]:
+    return [
+        TickerRecord(i["ticker"], None, None, "stocks", figi, active=i["active"],
+                     delisted_date=date.fromisoformat(i["delisted_utc"]) if i["delisted_utc"] else None)
+        for i in items
+    ]
+
+
+def events_json(events: list[TickerEvent]) -> list[dict]:
+    return [{"ticker": e.ticker, "date": e.date.isoformat(), "type": e.type} for e in events]
+
+
+def _events_from_json(items: list[dict]) -> list[TickerEvent]:
+    return [TickerEvent(i["ticker"], date.fromisoformat(i["date"]), i["type"]) for i in items]
+
+
+def _build_periods(
+    recs: list[TickerRecord], earlier_holder_end: date | None, events: list[TickerEvent]
+) -> list[tuple[str, date | None, date | None]]:
+    """(ticker, valid_from, valid_to) for one Security's kept Reference Records (ADR 0005).
+
+    The Reference Records win: they give every record's Ticker and end. The first record starts the day after any earlier
+    holder of its Ticker was delisted, else on the latest event naming it, else it is open-ended. Events before that
+    start give earlier Tickers, each running until the next event. Events dated after it are logged and ignored.
+    """
+    first = recs[0]
+    start = earlier_holder_end + timedelta(days=1) if earlier_holder_end else None
+    earlier: list[tuple[str, date, date]] = []
+    evs = sorted((e for e in events if e.ticker), key=lambda e: e.date)
+    own = [i for i, e in enumerate(evs) if e.ticker == first.ticker]
+    if own:
+        named = evs[own[-1]].date
+        if first.delisted_date and named > first.delisted_date:
+            log.info("ignoring Ticker History for %s: it starts %s, after the delisting on %s", first.ticker, named, first.delisted_date)
+        else:
+            if start is None:
+                start = named
+            ignored = evs[own[-1] + 1:]
+            if ignored:
+                log.info("ignoring %d Ticker History event(s) for %s dated after %s", len(ignored), first.ticker, named)
+            before = evs[: own[-1]]
+            for i, e in enumerate(before):
+                nxt = before[i + 1].date if i + 1 < len(before) else named
+                end = min(nxt - timedelta(days=1), start - timedelta(days=1))
+                if e.ticker != first.ticker and e.date <= end:
+                    earlier.append((e.ticker, e.date, end))
+    out: list[tuple[str, date | None, date | None]] = list(earlier)
+    for rec in recs:
+        out.append((rec.ticker, start, rec.delisted_date))
+        start = rec.delisted_date + timedelta(days=1) if rec.delisted_date else None
+    return out
+
+
+def _write_periods(conn, security_id: int, built: list[tuple[str, date | None, date | None]]) -> None:
+    conn.execute(text("DELETE FROM ticker_periods WHERE security_id = :s"), {"s": security_id})
+    for ticker, p_start, p_end in built:
+        conn.execute(
+            text("INSERT INTO ticker_periods (ticker, security_id, valid_from, valid_to) VALUES (:t, :s, :f, :e)"),
+            {"t": ticker, "s": security_id, "f": p_start, "e": p_end},
+        )
+
+
 def sync_reference(source: MarketDataSource, engine: Engine) -> None:
     """Create a Security per exchange-listed share-class FIGI and rebuild its Ticker periods from Reference Records.
 
     An inactive record's period ends on its delisting; the Security's next record starts the day after. The first record
-    starts the day after any earlier holder of that Ticker was delisted, else it is open-ended. Over-the-counter Tickers
-    and Tickers without a FIGI are outside the Universe and skipped. The whole sync is one transaction.
+    starts the day after any earlier holder of that Ticker was delisted, else where stored Ticker History says, else it is
+    open-ended. Over-the-counter Tickers and Tickers without a FIGI are outside the Universe and skipped. The whole sync
+    is one transaction.
     """
     by_figi: dict[str, list[TickerRecord]] = {}
     for rec in source.tickers():
@@ -88,6 +162,12 @@ def sync_reference(source: MarketDataSource, engine: Engine) -> None:
                 delistings.setdefault(r.ticker, []).append((r.delisted_date, figi))
 
     with engine.begin() as conn:
+        history = {
+            figi: _events_from_json(events)
+            for figi, events in conn.execute(
+                text("SELECT s.share_class_figi, h.events FROM ticker_history h JOIN securities s USING (security_id)")
+            )
+        }
         for figi, recs in kept.items():
             head = recs[-1]
             if head.cik:
@@ -98,28 +178,44 @@ def sync_reference(source: MarketDataSource, engine: Engine) -> None:
             first = recs[0]
             earlier = [d for d, other in delistings.get(first.ticker, []) if other != figi
                        and (first.delisted_date is None or d < first.delisted_date)]
-            start = max(earlier) + timedelta(days=1) if earlier else None
-            built = []
-            for rec in recs:
-                built.append((rec.ticker, start, rec.delisted_date))
-                start = rec.delisted_date + timedelta(days=1) if rec.delisted_date else None
+            built = _build_periods(recs, max(earlier) if earlier else None, history.get(figi, []))
             _attach_to_provisional(conn, figi, built)
             security_id = conn.execute(
                 text(
-                    "INSERT INTO securities (share_class_figi, name, type, issuer_cik, market) "
-                    "VALUES (:figi, :name, :type, :cik, :market) "
+                    "INSERT INTO securities (share_class_figi, name, type, issuer_cik, market, reference_records) "
+                    "VALUES (:figi, :name, :type, :cik, :market, CAST(:records AS jsonb)) "
                     "ON CONFLICT (share_class_figi) DO UPDATE SET name = EXCLUDED.name, type = EXCLUDED.type, "
-                    "issuer_cik = EXCLUDED.issuer_cik, market = EXCLUDED.market RETURNING security_id"
+                    "issuer_cik = EXCLUDED.issuer_cik, market = EXCLUDED.market, "
+                    "reference_records = EXCLUDED.reference_records RETURNING security_id"
                 ),
                 {"figi": figi, "name": head.name, "type": _security_type(head.type), "cik": head.cik,
-                 "market": head.market},
+                 "market": head.market, "records": json.dumps(records_json(by_figi[figi]))},
             ).scalar_one()
-            conn.execute(text("DELETE FROM ticker_periods WHERE security_id = :s"), {"s": security_id})
-            for ticker, p_start, p_end in built:
-                conn.execute(
-                    text("INSERT INTO ticker_periods (ticker, security_id, valid_from, valid_to) VALUES (:t, :s, :f, :e)"),
-                    {"t": ticker, "s": security_id, "f": p_start, "e": p_end},
-                )
+            _write_periods(conn, security_id, built)
+
+
+def rebuild_periods(conn, security_id: int) -> None:
+    """Rebuild one Security's Ticker periods from its stored Reference Records and Ticker History, without calling the source."""
+    figi, stored, events = conn.execute(
+        text("SELECT s.share_class_figi, s.reference_records, h.events FROM securities s "
+             "LEFT JOIN ticker_history h USING (security_id) WHERE s.security_id = :s"),
+        {"s": security_id},
+    ).one()
+    if not stored:
+        return
+    recs = _one_per_delisting(_records_from_json(figi, stored))
+    first = recs[0]
+    probe = json.dumps([{"ticker": first.ticker, "active": False}])
+    ends = []
+    for other_figi, other in conn.execute(
+        text("SELECT share_class_figi, reference_records FROM securities "
+             "WHERE security_id <> :s AND reference_records @> CAST(:p AS jsonb)"),
+        {"s": security_id, "p": probe},
+    ):
+        ends += [r.delisted_date for r in _one_per_delisting(_records_from_json(other_figi, other))
+                 if r.ticker == first.ticker and not r.active and r.delisted_date
+                 and (first.delisted_date is None or r.delisted_date < first.delisted_date)]
+    _write_periods(conn, security_id, _build_periods(recs, max(ends) if ends else None, _events_from_json(events or [])))
 
 
 def _attach_to_provisional(conn, figi: str, periods: list[tuple[str, date | None, date | None]]) -> None:

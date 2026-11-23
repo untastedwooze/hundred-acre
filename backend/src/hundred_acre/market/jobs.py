@@ -20,9 +20,11 @@ from hundred_acre.market.lake import (
 )
 from hundred_acre.market.quarantine import quarantine_bars, release_quarantine
 from hundred_acre.market.reference import list_ticker_periods, security_on, securities_expected_to_trade, sync_reference
+from hundred_acre.market.priority import PriorityClass, at_priority
 from hundred_acre.market.sessions import assign_sessions
 from hundred_acre.market.source import MarketDataSource, MarketDataUnavailable
 from hundred_acre.market.statistics import refresh_statistics
+from hundred_acre.market.ticker_history import fetch_ticker_history
 from hundred_acre.market.trading_calendar import (
     CalendarDisagreement, generate_calendar, previous_trading_day, read_trading_calendar,
 )
@@ -225,8 +227,9 @@ def backfill_intraday_bars(
 
 
 def run_backfill(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> None:
-    """The `backfill` command: two years of Daily Bars for the Universe, then of Intraday Bars for the Watchlist."""
+    """The `backfill` command: Ticker History for Securities without any, then two years of Daily Bars for the Universe, then of Intraday Bars for the Watchlist."""
     sync_reference(source, engine)
+    fetch_ticker_history(at_priority(source, PriorityClass.BACKFILL), engine, only_missing=True)
     backfill_daily_bars(source, as_of, engine=engine, lake=lake)
     backfill_intraday_bars(source, as_of, engine=engine, lake=lake)
 
