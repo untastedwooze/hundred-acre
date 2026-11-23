@@ -11,6 +11,8 @@ from hundred_acre.market.source import MarketDataSource
 def fetch_ticker_history(source: MarketDataSource, engine: Engine, *, force: bool = False, only_missing: bool = False) -> int:
     """Fetch Ticker History for the Securities that need it; returns how many were fetched.
 
+    There is no separate queue: a Security with no `ticker_history` row is waiting for its fetch.
+
     A Security needs it if it has none, or (unless `only_missing`) its Reference Records differ from the ones its History
     was fetched against; `force` refetches every Security. One Security per write, with its Ticker periods rebuilt in the
     same transaction, so an interrupted fetch resumes without refetching finished Securities. A source outage stops the

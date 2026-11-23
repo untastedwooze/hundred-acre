@@ -7,7 +7,9 @@ from sqlalchemy import Engine, text
 
 from hundred_acre.market.lake import Lake
 from hundred_acre.market.priority import PriorityClass, at_priority
-from hundred_acre.market.reference import _build_periods, _security_type, _write_periods, records_json, security_on
+from hundred_acre.market.reference import (
+    _build_periods, _one_per_delisting, _security_type, _write_periods, earlier_holder_end_stored, records_json, security_on,
+)
 from hundred_acre.market.source import MarketDataSource
 
 
@@ -62,30 +64,34 @@ def _create_security(source: MarketDataSource, engine: Engine, ticker: str) -> i
     records = source.lookup_ticker(ticker)
     if not records:
         raise ValueError(f"unknown Ticker {ticker!r}")
-    rec = records[-1]
+    last = records[-1]
+    # The lookup returns every holder of the Ticker; this Security is the one share-class FIGI of the last record.
+    own = [r for r in records if r.share_class_figi == last.share_class_figi] if last.share_class_figi else [last]
+    recs = _one_per_delisting(own)
+    rec = recs[-1]
     with engine.begin() as conn:
         if rec.cik:
             conn.execute(
                 text("INSERT INTO issuers (cik, name) VALUES (:c, :n) ON CONFLICT (cik) DO UPDATE SET name = EXCLUDED.name"),
                 {"c": rec.cik, "n": rec.name},
             )
-        security_id = None
         if rec.share_class_figi:
             security_id = conn.execute(
                 text("SELECT security_id FROM securities WHERE share_class_figi = :f"), {"f": rec.share_class_figi}
             ).scalar()
-        if security_id is not None:  # the FIGI is already in the Universe: its periods came from the reference sync
-            return security_id
-        if security_id is None:  # no FIGI: unverified until one is attached, like a Provisional Security
-            security_id = conn.execute(
-                text(
-                    "INSERT INTO securities (share_class_figi, name, type, issuer_cik, verified, market, reference_records) "
-                    "VALUES (:f, :n, :t, :c, :v, :m, CAST(:r AS jsonb)) RETURNING security_id"
-                ),
-                {"f": rec.share_class_figi, "n": rec.name, "t": _security_type(rec.type), "c": rec.cik,
-                 "v": rec.share_class_figi is not None, "m": rec.market,
-                 "r": json.dumps(records_json(records)) if rec.share_class_figi else None},
-            ).scalar_one()
-        # Its Ticker History is not fetched here: with no ticker_history row, `market ticker-history` and `backfill` pick it up.
-        _write_periods(conn, security_id, [(rec.ticker, rec.list_date, rec.delisted_date)])
+            if security_id is not None:  # the FIGI is already in the Universe: its periods came from the reference sync
+                return security_id
+        # No FIGI: unverified until one is attached, like a Provisional Security.
+        security_id = conn.execute(
+            text(
+                "INSERT INTO securities (share_class_figi, name, type, issuer_cik, verified, market, reference_records) "
+                "VALUES (:f, :n, :t, :c, :v, :m, CAST(:r AS jsonb)) RETURNING security_id"
+            ),
+            {"f": rec.share_class_figi, "n": rec.name, "t": _security_type(rec.type), "c": rec.cik,
+             "v": rec.share_class_figi is not None, "m": rec.market,
+             "r": json.dumps(records_json(own)) if rec.share_class_figi else None},
+        ).scalar_one()
+        # Same period rule as the reference sync, with no Ticker History yet. That is fetched later: a Security with no
+        # `ticker_history` row is the queue, and `market ticker-history` and `backfill` fetch exactly those.
+        _write_periods(conn, security_id, _build_periods(recs, earlier_holder_end_stored(conn, recs[0]), []))
     return security_id

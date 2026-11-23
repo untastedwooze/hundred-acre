@@ -3,6 +3,7 @@
 import json
 import logging
 from dataclasses import dataclass
+from collections.abc import Iterable
 from datetime import date, timedelta
 
 from sqlalchemy import Engine, text
@@ -29,27 +30,6 @@ class SecurityInfo:
 
 def _security_type(code: str | None) -> str | None:
     return _TYPES.get(code, code.lower() if code else None)
-
-
-def _history_periods(rec: TickerRecord, events: list[TickerEvent]) -> list[tuple[str, date | None, date | None]]:
-    """(ticker, valid_from, valid_to) for one Reference Record using Ticker History for its start and earlier Tickers.
-
-    The record's Ticker starts at the latest event naming it (else its list date) and ends on its delisting; each earlier
-    Ticker runs until the next event. Events with a blank Ticker are ignored.
-    """
-    evs = sorted((e for e in events if e.ticker), key=lambda e: e.date)
-    own = [i for i, e in enumerate(evs) if e.ticker == rec.ticker]
-    if not own:
-        return [(rec.ticker, rec.list_date, rec.delisted_date)]
-    start = evs[own[-1]].date
-    earlier = evs[: own[-1]]
-    out = []
-    for i, e in enumerate(earlier):
-        nxt = earlier[i + 1].date if i + 1 < len(earlier) else start
-        if e.ticker != rec.ticker and e.date < nxt:
-            out.append((e.ticker, e.date, nxt - timedelta(days=1)))
-    out.append((rec.ticker, start, rec.delisted_date))
-    return out
 
 
 def _main_ticker(records: list[TickerRecord]) -> TickerRecord:
@@ -133,6 +113,45 @@ def _build_periods(
     return out
 
 
+def earlier_holder_end(first: TickerRecord, delistings: Iterable[date]) -> date | None:
+    """The latest of `delistings` (of other Securities' holders of `first.ticker`) that precede `first`'s own delisting."""
+    return max((d for d in delistings if first.delisted_date is None or d < first.delisted_date), default=None)
+
+
+def earlier_holder_end_stored(conn, first: TickerRecord, *, excluding: int | None = None) -> date | None:
+    """`earlier_holder_end` from the stored Reference Records of every Security but `excluding`."""
+    probe = json.dumps([{"ticker": first.ticker, "active": False}])
+    ends: list[date] = []
+    for other_figi, other in conn.execute(
+        text("SELECT share_class_figi, reference_records FROM securities "
+             "WHERE security_id IS DISTINCT FROM :s AND reference_records @> CAST(:p AS jsonb)"),
+        {"s": excluding, "p": probe},
+    ):
+        ends += [r.delisted_date for r in _one_per_delisting(_records_from_json(other_figi, other))
+                 if r.ticker == first.ticker and not r.active and r.delisted_date]
+    return earlier_holder_end(first, ends)
+
+
+def period_preference(ticker: str, valid_from: date | None) -> tuple[int, str]:
+    """Sort key of a Ticker period for choosing the one Daily Bar a Security keeps on a day: the lowest key wins.
+
+    Of the Ticker periods covering the day, the one that started latest wins (an open start counts as oldest); a tie goes
+    to the alphabetically first Ticker, so the choice never depends on the order the Bars arrived in.
+    """
+    return (-(valid_from.toordinal() if valid_from else 0), ticker)
+
+
+def period_preference_on(engine: Engine, ticker: str, security_id: int, on: date) -> tuple[int, str] | None:
+    """`period_preference` of the period of `ticker` on `security_id` covering `on`, or None if there is none."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT valid_from FROM ticker_periods WHERE ticker = :t AND security_id = :s "
+                 "AND (valid_from IS NULL OR valid_from <= :d) AND (valid_to IS NULL OR valid_to >= :d)"),
+            {"t": ticker, "s": security_id, "d": on},
+        ).all()
+    return min((period_preference(ticker, r[0]) for r in rows), default=None)
+
+
 def _write_periods(conn, security_id: int, built: list[tuple[str, date | None, date | None]]) -> None:
     conn.execute(text("DELETE FROM ticker_periods WHERE security_id = :s"), {"s": security_id})
     for ticker, p_start, p_end in built:
@@ -176,9 +195,8 @@ def sync_reference(source: MarketDataSource, engine: Engine) -> None:
                     {"c": head.cik, "n": head.name},
                 )
             first = recs[0]
-            earlier = [d for d, other in delistings.get(first.ticker, []) if other != figi
-                       and (first.delisted_date is None or d < first.delisted_date)]
-            built = _build_periods(recs, max(earlier) if earlier else None, history.get(figi, []))
+            ends = earlier_holder_end(first, (d for d, other in delistings.get(first.ticker, []) if other != figi))
+            built = _build_periods(recs, ends, history.get(figi, []))
             _attach_to_provisional(conn, figi, built)
             security_id = conn.execute(
                 text(
@@ -204,18 +222,8 @@ def rebuild_periods(conn, security_id: int) -> None:
     if not stored:
         return
     recs = _one_per_delisting(_records_from_json(figi, stored))
-    first = recs[0]
-    probe = json.dumps([{"ticker": first.ticker, "active": False}])
-    ends = []
-    for other_figi, other in conn.execute(
-        text("SELECT share_class_figi, reference_records FROM securities "
-             "WHERE security_id <> :s AND reference_records @> CAST(:p AS jsonb)"),
-        {"s": security_id, "p": probe},
-    ):
-        ends += [r.delisted_date for r in _one_per_delisting(_records_from_json(other_figi, other))
-                 if r.ticker == first.ticker and not r.active and r.delisted_date
-                 and (first.delisted_date is None or r.delisted_date < first.delisted_date)]
-    _write_periods(conn, security_id, _build_periods(recs, max(ends) if ends else None, _events_from_json(events or [])))
+    _write_periods(conn, security_id, _build_periods(recs, earlier_holder_end_stored(conn, recs[0], excluding=security_id),
+                                                     _events_from_json(events or [])))
 
 
 def _attach_to_provisional(conn, figi: str, periods: list[tuple[str, date | None, date | None]]) -> None:
