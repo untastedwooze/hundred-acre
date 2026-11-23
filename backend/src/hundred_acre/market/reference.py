@@ -27,36 +27,83 @@ def _security_type(code: str | None) -> str | None:
     return _TYPES.get(code, code.lower() if code else None)
 
 
-def _periods(rec: TickerRecord, changes: list[TickerEvent]) -> list[tuple[str, date | None, date | None]]:
-    """(ticker, valid_from, valid_to) for one reference record, split at its rename events."""
-    out, start = [], rec.list_date
-    for e in sorted(changes, key=lambda e: e.date):
-        out.append((e.ticker, start, e.date - timedelta(days=1)))
-        start = e.date
+def _history_periods(rec: TickerRecord, events: list[TickerEvent]) -> list[tuple[str, date | None, date | None]]:
+    """(ticker, valid_from, valid_to) for one Reference Record using Ticker History for its start and earlier Tickers.
+
+    The record's Ticker starts at the latest event naming it (else its list date) and ends on its delisting; each earlier
+    Ticker runs until the next event. Events with a blank Ticker are ignored.
+    """
+    evs = sorted((e for e in events if e.ticker), key=lambda e: e.date)
+    own = [i for i, e in enumerate(evs) if e.ticker == rec.ticker]
+    if not own:
+        return [(rec.ticker, rec.list_date, rec.delisted_date)]
+    start = evs[own[-1]].date
+    earlier = evs[: own[-1]]
+    out = []
+    for i, e in enumerate(earlier):
+        nxt = earlier[i + 1].date if i + 1 < len(earlier) else start
+        if e.ticker != rec.ticker and e.date < nxt:
+            out.append((e.ticker, e.date, nxt - timedelta(days=1)))
     out.append((rec.ticker, start, rec.delisted_date))
     return out
 
 
-def sync_reference(source: MarketDataSource, engine: Engine) -> None:
-    """Create a Security per exchange-listed share-class FIGI and rebuild its Ticker periods.
+def _main_ticker(records: list[TickerRecord]) -> TickerRecord:
+    """Of inactive records sharing a delisting date, the one without a `w`, `.Q` or `E`-style suffix, else the first alphabetically."""
+    tickers = {r.ticker for r in records}
 
-    Over-the-counter Tickers and Tickers without a FIGI are outside the Universe and skipped.
+    def is_variant(t: str) -> bool:
+        return "." in t or t[-1:].islower() or (t.endswith("E") and t[:-1] in tickers)
+
+    plain = [r for r in records if not is_variant(r.ticker)]
+    return min(plain or records, key=lambda r: r.ticker)
+
+
+def _one_per_delisting(recs: list[TickerRecord]) -> list[TickerRecord]:
+    """A Security's records ordered by delisting date (active last), one per shared delisting date."""
+    inactive: dict[date | None, list[TickerRecord]] = {}
+    for r in recs:
+        if not r.active:
+            inactive.setdefault(r.delisted_date, []).append(r)
+    kept = [_main_ticker(group) for _, group in sorted(inactive.items(), key=lambda kv: (kv[0] is None, kv[0] or date.min))]
+    return kept + [r for r in recs if r.active]
+
+
+def sync_reference(source: MarketDataSource, engine: Engine) -> None:
+    """Create a Security per exchange-listed share-class FIGI and rebuild its Ticker periods from Reference Records.
+
+    An inactive record's period ends on its delisting; the Security's next record starts the day after. The first record
+    starts the day after any earlier holder of that Ticker was delisted, else it is open-ended. Over-the-counter Tickers
+    and Tickers without a FIGI are outside the Universe and skipped. The whole sync is one transaction.
     """
     by_figi: dict[str, list[TickerRecord]] = {}
     for rec in source.tickers():
         if rec.market != "otc" and rec.share_class_figi:
             by_figi.setdefault(rec.share_class_figi, []).append(rec)
-    events = {rec.ticker: source.ticker_events(rec.ticker) for recs in by_figi.values() for rec in recs}
+    kept = {figi: _one_per_delisting(recs) for figi, recs in by_figi.items()}
+    delistings: dict[str, list[tuple[date, str]]] = {}  # ticker -> (delisted, figi) of every inactive holder
+    for figi, recs in kept.items():
+        for r in recs:
+            if not r.active and r.delisted_date:
+                delistings.setdefault(r.ticker, []).append((r.delisted_date, figi))
 
     with engine.begin() as conn:
-        for figi, recs in by_figi.items():
+        for figi, recs in kept.items():
             head = recs[-1]
             if head.cik:
                 conn.execute(
                     text("INSERT INTO issuers (cik, name) VALUES (:c, :n) ON CONFLICT (cik) DO UPDATE SET name = EXCLUDED.name"),
                     {"c": head.cik, "n": head.name},
                 )
-            _attach_to_provisional(conn, figi, [p for rec in recs for p in _periods(rec, events[rec.ticker])])
+            first = recs[0]
+            earlier = [d for d, other in delistings.get(first.ticker, []) if other != figi
+                       and (first.delisted_date is None or d < first.delisted_date)]
+            start = max(earlier) + timedelta(days=1) if earlier else None
+            built = []
+            for rec in recs:
+                built.append((rec.ticker, start, rec.delisted_date))
+                start = rec.delisted_date + timedelta(days=1) if rec.delisted_date else None
+            _attach_to_provisional(conn, figi, built)
             security_id = conn.execute(
                 text(
                     "INSERT INTO securities (share_class_figi, name, type, issuer_cik, market) "
@@ -68,12 +115,11 @@ def sync_reference(source: MarketDataSource, engine: Engine) -> None:
                  "market": head.market},
             ).scalar_one()
             conn.execute(text("DELETE FROM ticker_periods WHERE security_id = :s"), {"s": security_id})
-            for rec in recs:
-                for ticker, start, end in _periods(rec, events[rec.ticker]):
-                    conn.execute(
-                        text("INSERT INTO ticker_periods (ticker, security_id, valid_from, valid_to) VALUES (:t, :s, :f, :e)"),
-                        {"t": ticker, "s": security_id, "f": start, "e": end},
-                    )
+            for ticker, p_start, p_end in built:
+                conn.execute(
+                    text("INSERT INTO ticker_periods (ticker, security_id, valid_from, valid_to) VALUES (:t, :s, :f, :e)"),
+                    {"t": ticker, "s": security_id, "f": p_start, "e": p_end},
+                )
 
 
 def _attach_to_provisional(conn, figi: str, periods: list[tuple[str, date | None, date | None]]) -> None:

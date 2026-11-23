@@ -6,7 +6,7 @@ from sqlalchemy import text
 from hundred_acre.market.delistings import (
     assumed_delistings, delisting, record_spinoff, set_delisting_outcome, spinoffs_of, sync_delistings,
 )
-from hundred_acre.market.jobs import load_daily_bars
+from market_helpers import load_daily_bars
 from hundred_acre.market.lake import read_bars
 from hundred_acre.market.reference import sync_reference
 from hundred_acre.market.source import BarData, FakeMarketDataSource, TickerRecord

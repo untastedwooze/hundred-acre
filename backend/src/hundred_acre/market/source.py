@@ -123,6 +123,8 @@ class FakeMarketDataSource:
     failing_tickers: set[str] = field(default_factory=set)  # `aggregates` raises MarketDataUnavailable for these
     crash_after_aggregate_calls: int | None = None  # `aggregates` raises RuntimeError once this many calls were made
     aggregate_calls: list[tuple[str, date, date]] = field(default_factory=list)  # (ticker, start, end) per call
+    tickers_calls: int = 0  # number of `tickers` calls
+    events_calls: list[str] = field(default_factory=list)  # ticker per `ticker_events` call
 
     def _check(self) -> None:
         if not self.available:
@@ -156,10 +158,12 @@ class FakeMarketDataSource:
 
     def tickers(self) -> list[TickerRecord]:
         self._check()
+        self.tickers_calls += 1
         return list(self.tickers_)
 
     def ticker_events(self, ticker: str) -> list[TickerEvent]:
         self._check()
+        self.events_calls.append(ticker)
         return list(self.events.get(ticker, []))
 
     def splits(self, since: date) -> list[Split]:

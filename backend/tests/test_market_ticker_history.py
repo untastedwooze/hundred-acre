@@ -1,9 +1,9 @@
 from datetime import date
 
-from hundred_acre.market.jobs import load_daily_bars
+from market_helpers import load_daily_bars
 from hundred_acre.market.lake import read_bars
 from hundred_acre.market.reference import security_info, security_on
-from hundred_acre.market.source import BarData, FakeMarketDataSource, TickerEvent, TickerRecord
+from hundred_acre.market.source import BarData, FakeMarketDataSource, TickerRecord
 
 
 def bar(ticker: str, close: float) -> BarData:
@@ -13,8 +13,10 @@ def bar(ticker: str, close: float) -> BarData:
 def test_rename_keeps_one_continuous_security(market_engine, lake):
     before, after = date(2022, 10, 26), date(2022, 10, 28)
     source = FakeMarketDataSource()
-    source.tickers_ = [TickerRecord("META", "Meta", "CS", "stocks", "FIGI-META", cik="0001326801", list_date=date(2012, 5, 18))]
-    source.events["META"] = [TickerEvent("FB", date(2022, 10, 28), "ticker_change", new_ticker="META")]
+    source.tickers_ = [
+        TickerRecord("FB", "Facebook", "CS", "stocks", "FIGI-META", cik="0001326801", active=False, delisted_date=date(2022, 10, 27)),
+        TickerRecord("META", "Meta", "CS", "stocks", "FIGI-META", cik="0001326801"),
+    ]
     source.grouped_daily_bars[before] = [bar("FB", 100.0)]
     source.grouped_daily_bars[after] = [bar("META", 101.0)]
 
@@ -46,7 +48,8 @@ def test_reused_ticker_is_two_securities(market_engine, lake):
     assert old != new
     assert read_bars(lake, [old], old_day, new_day)["close"].to_list() == [1.0]
     assert read_bars(lake, [new], old_day, new_day)["close"].to_list() == [50.0]
-    assert security_on(market_engine, "GM", date(2009, 12, 1)) is None
+    assert security_on(market_engine, "GM", date(2009, 6, 1)) == old
+    assert security_on(market_engine, "GM", date(2009, 12, 1)) == new  # starts the day after the old holder was delisted
     assert security_on(market_engine, "GM", date(2012, 1, 3)) == new
 
 
@@ -82,8 +85,10 @@ def test_securities_carry_a_normalized_type(market_engine, lake):
 def test_resync_is_idempotent(market_engine, lake):
     day = date(2022, 10, 28)
     source = FakeMarketDataSource()
-    source.tickers_ = [TickerRecord("META", "Meta", "CS", "stocks", "FIGI-META")]
-    source.events["META"] = [TickerEvent("FB", day, "ticker_change", new_ticker="META")]
+    source.tickers_ = [
+        TickerRecord("FB", "Facebook", "CS", "stocks", "FIGI-META", active=False, delisted_date=date(2022, 10, 27)),
+        TickerRecord("META", "Meta", "CS", "stocks", "FIGI-META"),
+    ]
     source.grouped_daily_bars[day] = [bar("META", 1.0)]
 
     a = load_daily_bars(source, day, engine=market_engine, lake=lake).security_ids

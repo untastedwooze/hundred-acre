@@ -161,7 +161,7 @@ def intraday_requests(ticker: str, start: date, end: date, *, adjusted: bool) ->
 
 
 def tickers_request(*, active: bool) -> tuple[str, dict]:
-    return "/v3/reference/tickers", {"active": _flag(active), "limit": 1000}
+    return "/v3/reference/tickers", {"active": _flag(active), "market": "stocks", "limit": 1000}
 
 
 def ticker_events_request(ticker: str) -> tuple[str, dict]:

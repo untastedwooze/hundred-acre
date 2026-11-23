@@ -6,7 +6,7 @@ from sqlalchemy import Engine, text
 
 from hundred_acre.market.lake import Lake
 from hundred_acre.market.priority import PriorityClass, at_priority
-from hundred_acre.market.reference import _periods, _security_type, security_on, sync_reference
+from hundred_acre.market.reference import _history_periods, _security_type, security_on, sync_reference
 from hundred_acre.market.source import MarketDataSource
 
 
@@ -84,7 +84,7 @@ def _create_security(source: MarketDataSource, engine: Engine, ticker: str) -> i
                  "v": rec.share_class_figi is not None, "m": rec.market},
             ).scalar_one()
         conn.execute(text("DELETE FROM ticker_periods WHERE security_id = :s"), {"s": security_id})
-        for t, start, end in _periods(rec, source.ticker_events(rec.ticker)):
+        for t, start, end in _history_periods(rec, source.ticker_events(rec.ticker)):
             conn.execute(
                 text("INSERT INTO ticker_periods (ticker, security_id, valid_from, valid_to) VALUES (:t, :s, :f, :e)"),
                 {"t": t, "s": security_id, "f": start, "e": end},
