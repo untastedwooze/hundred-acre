@@ -95,6 +95,7 @@ def parse_tickers(pages: Pages, *, active: bool) -> list[TickerRecord]:
         TickerRecord(
             ticker=r["ticker"], name=r.get("name"), type=r.get("type"), market=r.get("market", "stocks"),
             share_class_figi=r.get("share_class_figi"), active=r.get("active", active),
+            cik=r.get("cik"), delisted_date=_date(r["delisted_utc"]) if r.get("delisted_utc") else None,
         )
         for r in _results(pages)
     ]
@@ -105,7 +106,7 @@ def parse_ticker_events(pages: Pages, ticker: str) -> list[TickerEvent]:
     for body in pages:
         events.extend((body.get("results") or {}).get("events") or [])
     return [
-        TickerEvent(ticker, _date(e["date"]), e.get("type", ""), (e.get("ticker_change") or {}).get("ticker"))
+        TickerEvent((e.get("ticker_change") or {}).get("ticker") or "", _date(e["date"]), e.get("type", ""))
         for e in events
     ]
 

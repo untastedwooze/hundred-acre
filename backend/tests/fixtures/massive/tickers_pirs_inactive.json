@@ -1,0 +1,22 @@
+{
+ "results": [
+  {
+   "ticker": "PIRS",
+   "name": "PIERIS PHARMACEUTICALS INC",
+   "market": "stocks",
+   "locale": "us",
+   "primary_exchange": "XNAS",
+   "type": "CS",
+   "active": false,
+   "currency_name": "usd",
+   "cik": "0001583648",
+   "composite_figi": "BBG0055C3N57",
+   "share_class_figi": "BBG0055C3N66",
+   "last_updated_utc": "2025-08-22T21:40:55.037833785Z",
+   "delisted_utc": "2024-12-16T00:00:00Z"
+  }
+ ],
+ "status": "OK",
+ "request_id": "ab121904c737f92ef0e8d32a32fce302",
+ "count": 1000
+}
