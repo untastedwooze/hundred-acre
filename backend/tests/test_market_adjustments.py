@@ -4,7 +4,7 @@ import pytest
 from sqlalchemy import text
 
 from hundred_acre.market.adjustments import corporate_action_history, sync_corporate_actions
-from hundred_acre.market.jobs import load_daily_bars
+from market_helpers import load_daily_bars
 from hundred_acre.market.lake import read_bars
 from hundred_acre.market.source import BarData, Dividend, FakeMarketDataSource, Split, TickerRecord
 

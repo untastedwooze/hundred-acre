@@ -3,7 +3,7 @@ from datetime import date
 import pytest
 
 from hundred_acre.market.coverage import coverage_summary
-from hundred_acre.market.jobs import backfill_daily_bars, load_daily_bars
+from market_helpers import backfill_daily_bars, load_daily_bars
 from hundred_acre.market.lake import read_bars
 from hundred_acre.market.source import BarData, FakeMarketDataSource, TickerRecord
 

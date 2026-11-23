@@ -3,7 +3,8 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from hundred_acre.market.adjustments import sync_corporate_actions
-from hundred_acre.market.jobs import backfill_intraday_bars, load_daily_bars
+from hundred_acre.market.jobs import backfill_intraday_bars
+from market_helpers import load_daily_bars
 from hundred_acre.market.source import BarData, FakeMarketDataSource, Split, TickerRecord
 from hundred_acre.market.statistics import read_security_statistics, refresh_statistics
 

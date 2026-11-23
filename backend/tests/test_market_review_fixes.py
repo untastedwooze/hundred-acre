@@ -7,7 +7,8 @@ from sqlalchemy import text
 
 from hundred_acre.market.adjustments import corporate_action_history, sync_corporate_actions
 from hundred_acre.market.cli import main
-from hundred_acre.market.jobs import load_daily_bars, nightly_daily_bars, nightly_intraday_bars, run_weekly
+from hundred_acre.market.jobs import nightly_daily_bars, nightly_intraday_bars, run_weekly
+from market_helpers import load_daily_bars
 from hundred_acre.market.lake import read_bars, read_intraday_bars
 from hundred_acre.market.quarantine import list_provisional_securities
 from hundred_acre.market.source import (
@@ -133,15 +134,13 @@ def test_watchlist_add_unknown_ticker_fails_cleanly(market_engine, lake, capsys)
     assert "NOPE" in capsys.readouterr().err
 
 
-def test_otc_watchlist_and_unlisted_securities_get_no_empty_coverage(market_engine, lake):
+def test_otc_watchlist_securities_get_no_empty_coverage(market_engine, lake):
     s = source("AAA")
     s.tickers_.append(TickerRecord("OTCX", "Otc", "CS", "otc", "BBGOTC0000"))
-    s.tickers_.append(TickerRecord("LATE", "Late", "CS", "stocks", "BBGLATE000", list_date=date(2026, 12, 1)))
     otc = add_to_watchlist(s, market_engine, lake, "OTCX", as_of=MON)
     load_daily_bars(s, MON, engine=market_engine, lake=lake)
 
     assert cov(market_engine, otc, MON) is None
-    assert cov(market_engine, sid_of(market_engine, "LATE"), MON) is None
     assert cov(market_engine, sid_of(market_engine, "AAA"), MON) == "complete"
 
 

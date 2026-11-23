@@ -6,7 +6,7 @@ import pytest
 
 from hundred_acre.market.adjustments import sync_corporate_actions
 from hundred_acre.market.delistings import set_delisting_outcome, sync_delistings
-from hundred_acre.market.jobs import load_daily_bars
+from market_helpers import load_daily_bars
 from hundred_acre.market.reference import sync_reference
 from hundred_acre.market.returns import daily_total_returns
 from hundred_acre.market.source import BarData, Dividend, FakeMarketDataSource, Split, TickerRecord

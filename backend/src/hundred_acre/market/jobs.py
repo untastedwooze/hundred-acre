@@ -59,13 +59,12 @@ def refresh_calendar(source: MarketDataSource, engine: Engine, start: date, end:
 
 
 def load_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> LoadResult:
-    """Sync reference data, then load `as_of`'s Unadjusted grouped-daily Bars (OTC excluded) into the lake.
+    """Load `as_of`'s Unadjusted grouped-daily Bars (OTC excluded) into the lake.
 
     Coverage is recorded for Securities expected to trade that day (exchange-listed, Ticker period covering it); an
     over-the-counter or not-yet-listed Security gets none unless it traded. If the source is unreachable those
     Securities get failed Coverage and the error propagates.
     """
-    sync_reference(source, engine)
     expected = set(securities_expected_to_trade(engine, as_of))
     fetched_at = datetime.now(timezone.utc)
     try:
@@ -155,7 +154,6 @@ def backfill_daily_bars(
     """
     start = since or _years_back(as_of, years)
     refresh_calendar(source, engine, start, date(as_of.year + 1, 12, 31))
-    sync_reference(source, engine)
 
     def build(security_id, missing, fetched, fetched_at):
         by_day = {d: b for d, b in fetched if d in set(missing)}
@@ -176,6 +174,7 @@ def nightly_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine,
     until it expires (retention: `snapshot_retention_days`). The Trading Calendar is regenerated through next year and
     cross-checked against Massive; disagreements come back on the result.
     """
+    sync_reference(source, engine)
     disagreements = refresh_calendar(source, engine, as_of - timedelta(days=14), date(as_of.year + 1, 12, 31))
     previous = previous_trading_day(engine, as_of)
     if previous is not None:
@@ -227,6 +226,7 @@ def backfill_intraday_bars(
 
 def run_backfill(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> None:
     """The `backfill` command: two years of Daily Bars for the Universe, then of Intraday Bars for the Watchlist."""
+    sync_reference(source, engine)
     backfill_daily_bars(source, as_of, engine=engine, lake=lake)
     backfill_intraday_bars(source, as_of, engine=engine, lake=lake)
 
@@ -294,6 +294,7 @@ def run_weekly(
     against Daily Bars with a re-fetch of each suspect day, then a refresh of the Daily Security Statistics the new
     Bars invalidated, then the Factor Exposure refresh. A failed import is logged and does not block the rest: the
     exposure refresh uses the last good vintage. `factor_source` defaults to French's Data Library."""
+    sync_reference(source, engine)
     if factor_source is None:
         factor_source = FrenchDataLibrarySource()
     try:
@@ -301,7 +302,6 @@ def run_weekly(
     except Exception as exc:  # whatever the import hit, the rest of the weekly job still runs
         log.warning("Reference Factor Return import failed, using the last good vintage: %s", exc, exc_info=True)
     since = as_of - timedelta(days=7)
-    sync_reference(source, engine)
     ids = non_watchlist_security_ids(engine, skipped_types=WEEKLY_SKIPPED_TYPES)
     backfill_intraday_bars(source, as_of, engine=engine, lake=lake, since=since, security_ids=ids)
     _resolve_suspect_days(source, as_of, since, ids, engine=engine, lake=lake)
