@@ -72,5 +72,5 @@ def test_weekly_and_backfill_use_their_own_class(job, expected, market_engine, l
 def test_watchlist_add_looks_up_interactively_and_backfills_intraday_at_backfill(market_engine, lake):
     s = spy()
     assert main(["watchlist", "add", "AAPL", "--as-of", "2026-11-13"], source=s, engine=market_engine, lake=lake) == 0
-    assert classes(s, "tickers") == {P.INTERACTIVE}
+    assert classes(s, "lookup_ticker") == {P.INTERACTIVE}
     assert classes(s, "intraday_aggregates") == {P.BACKFILL}

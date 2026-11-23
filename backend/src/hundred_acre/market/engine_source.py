@@ -93,6 +93,9 @@ class EngineSource:
         active, inactive = self._fetch([m.tickers_request(active=True), m.tickers_request(active=False)])
         return m.parse_tickers(active, active=True) + m.parse_tickers(inactive, active=False)
 
+    def lookup_ticker(self, ticker: str) -> list[TickerRecord]:
+        return m.parse_tickers(self._one(m.ticker_lookup_request(ticker)), active=True)
+
     def ticker_events(self, ticker: str) -> list[TickerEvent]:
         try:
             pages = self._one(m.ticker_events_request(ticker))

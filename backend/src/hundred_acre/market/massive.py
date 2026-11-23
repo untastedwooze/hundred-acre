@@ -164,6 +164,11 @@ def tickers_request(*, active: bool) -> tuple[str, dict]:
     return "/v3/reference/tickers", {"active": _flag(active), "market": "stocks", "limit": 1000}
 
 
+def ticker_lookup_request(ticker: str) -> tuple[str, dict]:
+    """One ticker across all markets, active and inactive (no `market` or `active` filter)."""
+    return "/v3/reference/tickers", {"ticker": ticker}
+
+
 def ticker_events_request(ticker: str) -> tuple[str, dict]:
     return f"/vX/reference/tickers/{urllib.parse.quote(ticker)}/events", {}
 
@@ -244,6 +249,9 @@ class MassiveSource:
         for active in (True, False):
             out.extend(parse_tickers(self._paged(*tickers_request(active=active)), active=active))
         return out
+
+    def lookup_ticker(self, ticker: str) -> list[TickerRecord]:
+        return parse_tickers(self._paged(*ticker_lookup_request(ticker)), active=True)
 
     def ticker_events(self, ticker: str) -> list[TickerEvent]:
         try:

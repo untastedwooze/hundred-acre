@@ -5,7 +5,8 @@ from sqlalchemy import text
 from hundred_acre.market.jobs import nightly_intraday_bars
 from hundred_acre.market.lake import read_intraday_bars
 from hundred_acre.market.reference import security_info, security_on, sync_reference
-from hundred_acre.market.source import BarData, FakeMarketDataSource, TickerRecord
+from hundred_acre.market.source import BarData, FakeMarketDataSource, TickerEvent, TickerRecord
+from hundred_acre.market.ticker_history import fetch_ticker_history
 from hundred_acre.market.watchlist import add_to_watchlist, remove_from_watchlist, watchlist
 
 MON, TUE = date(2026, 11, 23), date(2026, 11, 24)
@@ -176,6 +177,26 @@ def test_a_hand_added_otc_security_joins_the_universe(market_engine, lake):
     assert sessions_of(lake, sid, MON) == [(utc(MON, 14, 30), "regular")]
     sync_reference(source, market_engine)  # a later sync keeps it
     assert security_on(market_engine, "NSRGY", MON) == sid
+
+
+def test_adding_an_unknown_ticker_makes_one_lookup_call_and_no_sync(market_engine, lake):
+    source = make_source((utc(MON, 14, 30), bar()))
+
+    add_to_watchlist(source, market_engine, lake, "AAPL", as_of=MON)
+
+    assert source.lookup_calls == ["AAPL"]
+    assert source.tickers_calls == 0
+    assert source.events_calls == []
+
+
+def test_a_new_security_added_to_the_watchlist_has_its_ticker_history_queued(market_engine, lake):
+    source = make_source((utc(MON, 14, 30), bar()))
+    source.events["AAPL"] = [TickerEvent("AAPL", date(2010, 1, 4), "ticker_change")]
+    sid = add_to_watchlist(source, market_engine, lake, "AAPL", as_of=MON)
+    with market_engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM ticker_history WHERE security_id = :s"), {"s": sid}).scalar() == 0
+
+    assert fetch_ticker_history(source, market_engine) == 1
 
 
 def test_intraday_bars_record_the_ticker_they_were_fetched_under(market_engine, lake):

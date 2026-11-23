@@ -92,6 +92,10 @@ class MarketDataSource(Protocol):
         """Tickers reference data."""
         ...
 
+    def lookup_ticker(self, ticker: str) -> list[TickerRecord]:
+        """One Call: the Reference Records for `ticker` across all markets, active and inactive."""
+        ...
+
     def ticker_events(self, ticker: str) -> list[TickerEvent]: ...
 
     def splits(self, since: date) -> list[Split]: ...
@@ -124,6 +128,7 @@ class FakeMarketDataSource:
     crash_after_aggregate_calls: int | None = None  # `aggregates` raises RuntimeError once this many calls were made
     aggregate_calls: list[tuple[str, date, date]] = field(default_factory=list)  # (ticker, start, end) per call
     tickers_calls: int = 0  # number of `tickers` calls
+    lookup_calls: list[str] = field(default_factory=list)  # ticker per `lookup_ticker` call
     events_calls: list[str] = field(default_factory=list)  # ticker per `ticker_events` call
 
     def _check(self) -> None:
@@ -160,6 +165,11 @@ class FakeMarketDataSource:
         self._check()
         self.tickers_calls += 1
         return list(self.tickers_)
+
+    def lookup_ticker(self, ticker: str) -> list[TickerRecord]:
+        self._check()
+        self.lookup_calls.append(ticker)
+        return [r for r in self.tickers_ if r.ticker == ticker]
 
     def ticker_events(self, ticker: str) -> list[TickerEvent]:
         self._check()
