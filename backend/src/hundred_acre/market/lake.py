@@ -12,17 +12,18 @@ import polars as pl
 from sqlalchemy.engine import make_url
 
 BAR_COLUMNS = (
-    "security_id", "trading_date", "open", "high", "low", "close", "volume", "vwap", "trade_count", "source", "fetched_at",
+    "security_id", "trading_date", "ticker", "open", "high", "low", "close", "volume", "vwap", "trade_count", "source",
+    "fetched_at",
 )
 
 BAR_SCHEMA = {
-    "security_id": pl.Int64, "trading_date": pl.Date, "open": pl.Float64, "high": pl.Float64, "low": pl.Float64,
+    "security_id": pl.Int64, "trading_date": pl.Date, "ticker": pl.String, "open": pl.Float64, "high": pl.Float64, "low": pl.Float64,
     "close": pl.Float64, "volume": pl.Float64, "vwap": pl.Float64, "trade_count": pl.Int64, "source": pl.String,
     "fetched_at": pl.Datetime("us", "UTC"),
 }
 
 INTRADAY_COLUMNS = (
-    "security_id", "trading_date", "bar_start", "trading_session", "open", "high", "low", "close", "volume", "vwap",
+    "security_id", "trading_date", "ticker", "bar_start", "trading_session", "open", "high", "low", "close", "volume", "vwap",
     "trade_count", "source", "fetched_at",
 )
 
@@ -30,14 +31,14 @@ INTRADAY_SCHEMA = {**BAR_SCHEMA, "bar_start": pl.Datetime("us", "UTC"), "trading
 
 _CREATE_INTRADAY = """
 CREATE TABLE IF NOT EXISTS lake.intraday_bars (
-    security_id BIGINT, trading_date DATE, bar_start TIMESTAMPTZ, trading_session VARCHAR,
+    security_id BIGINT, trading_date DATE, ticker VARCHAR, bar_start TIMESTAMPTZ, trading_session VARCHAR,
     open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE, vwap DOUBLE,
     trade_count BIGINT, source VARCHAR, fetched_at TIMESTAMPTZ
 )"""
 
 _CREATE_BARS = """
 CREATE TABLE IF NOT EXISTS lake.daily_bars (
-    security_id BIGINT, trading_date DATE,
+    security_id BIGINT, trading_date DATE, ticker VARCHAR,
     open DOUBLE, high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE, vwap DOUBLE,
     trade_count BIGINT, source VARCHAR, fetched_at TIMESTAMPTZ
 )"""
@@ -120,10 +121,15 @@ def transaction(con: duckdb.DuckDBPyConnection) -> Iterator[None]:
     con.execute("COMMIT")
 
 
-def bar_row(security_id: int, trading_date: date, bar, *, source: str, fetched_at: datetime, **extra) -> dict:
-    """One Bar as a row dict for BAR_SCHEMA (or INTRADAY_SCHEMA with `extra`); `bar` is any object with price fields."""
+def bar_row(
+    security_id: int, trading_date: date, bar, *, source: str, fetched_at: datetime, ticker: str | None = None, **extra
+) -> dict:
+    """One Bar as a row dict for BAR_SCHEMA (or INTRADAY_SCHEMA with `extra`); `bar` is any object with price fields.
+
+    `ticker` is the Ticker the Bar was fetched under (provenance only); it defaults to `bar.ticker`.
+    """
     return dict(
-        security_id=security_id, trading_date=trading_date, open=bar.open, high=bar.high, low=bar.low, close=bar.close,
+        security_id=security_id, trading_date=trading_date, ticker=bar.ticker if ticker is None else ticker, open=bar.open, high=bar.high, low=bar.low, close=bar.close,
         volume=bar.volume, vwap=bar.vwap, trade_count=bar.trade_count, source=source, fetched_at=fetched_at, **extra,
     )
 
@@ -147,6 +153,13 @@ def replace_bars(lake: Lake, bars: pl.DataFrame, security_ids: Sequence[int], da
                 [list(security_ids), list(days)],
             )
             con.execute("INSERT INTO lake.daily_bars SELECT * FROM incoming")
+
+
+def securities_with_bars(lake: Lake, trading_date: date) -> set[int]:
+    """Ids of the Securities that have a Daily Bar on `trading_date`."""
+    with lake.connect() as con:
+        rows = con.execute("SELECT DISTINCT security_id FROM lake.daily_bars WHERE trading_date = ?", [trading_date]).fetchall()
+    return {r[0] for r in rows}
 
 
 def add_bars(lake: Lake, bars: pl.DataFrame, trading_date: date) -> None:

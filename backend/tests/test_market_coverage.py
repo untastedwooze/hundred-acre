@@ -129,3 +129,13 @@ def test_grouped_daily_load_marks_absent_securities_empty(market_engine, lake):
     generate_calendar(market_engine, FIRST, LAST)
     s = summary_for(market_engine, list(ids.values()))
     assert (s[ids["AAPL"]]["complete"], s[ids["MSFT"]]["empty"]) == (1, 1)
+
+
+def test_backfilled_bars_record_the_ticker_they_were_fetched_under(market_engine, lake):
+    source = two_security_source()
+    backfill(source, market_engine, lake)
+
+    ids = ids_of(market_engine)
+    df = read_bars(lake, [ids["MSFT"]], FIRST, LAST, columns=["ticker"])
+
+    assert df["ticker"].to_list() == ["MSFT"] * len(TRADING_DAYS)

@@ -176,3 +176,13 @@ def test_a_hand_added_otc_security_joins_the_universe(market_engine, lake):
     assert sessions_of(lake, sid, MON) == [(utc(MON, 14, 30), "regular")]
     sync_reference(source, market_engine)  # a later sync keeps it
     assert security_on(market_engine, "NSRGY", MON) == sid
+
+
+def test_intraday_bars_record_the_ticker_they_were_fetched_under(market_engine, lake):
+    source = make_source((utc(MON, 14, 30), bar()))
+    sid = watch(source, market_engine, lake)
+    nightly_intraday_bars(source, MON, engine=market_engine, lake=lake)
+
+    df = read_intraday_bars(lake, [sid], MON, MON, columns=["ticker"])
+
+    assert df["ticker"].to_list() == ["AAPL"]
