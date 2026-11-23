@@ -1,0 +1,1 @@
+{"results": {"name": "Grayscale Bitcoin Trust ETF", "composite_figi": "BBG008748J88", "cik": "0001588489", "events": [{"ticker_change": {"ticker": ""}, "type": "ticker_change", "date": "2023-11-18"}, {"ticker_change": {"ticker": "GBTC"}, "type": "ticker_change", "date": "2021-09-23"}]}, "status": "OK", "request_id": "ea656f42ee46604f677e759d1ccd5f33"}

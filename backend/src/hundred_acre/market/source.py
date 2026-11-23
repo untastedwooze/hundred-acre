@@ -41,8 +41,8 @@ class TickerRecord:
 
 @dataclass(frozen=True)
 class TickerEvent:
-    ticker: str  # the Ticker before the change
-    date: date  # first day the Security traded as new_ticker
+    ticker: str  # the Ticker in use from `date` (Massive's ticker_change.ticker); may be '' or a placeholder
+    date: date  # first day the Security traded as `ticker`
     type: str  # e.g. "ticker_change"
     new_ticker: str | None = None
 

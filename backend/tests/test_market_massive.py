@@ -95,7 +95,7 @@ def test_parsing_works_on_raw_pages_without_http():
     assert recs[0].ticker == "A" and recs[0].active is True
     ev = m.parse_ticker_events([{"results": {"events": [
         {"date": "2020-01-02", "type": "ticker_change", "ticker_change": {"ticker": "B"}}]}}], "A")
-    assert ev[0].ticker == "A" and ev[0].date == date(2020, 1, 2)
+    assert ev[0].ticker == "B" and ev[0].date == date(2020, 1, 2)
     sp = m.parse_splits([{"results": [
         {"ticker": "A", "execution_date": "2020-01-02", "split_from": 1, "split_to": 2, "id": "s"}]}])
     assert sp[0].split_to == 2

@@ -1,0 +1,21 @@
+{
+ "results": [
+  {
+   "ticker": "PVLA",
+   "name": "Palvella Therapeutics, Inc. Common Stock",
+   "market": "stocks",
+   "locale": "us",
+   "primary_exchange": "XNAS",
+   "type": "CS",
+   "active": true,
+   "currency_name": "usd",
+   "cik": "0001583648",
+   "composite_figi": "BBG0055C3N57",
+   "share_class_figi": "BBG0055C3N66",
+   "last_updated_utc": "2026-11-21T07:12:26.732230657Z"
+  }
+ ],
+ "status": "OK",
+ "request_id": "2e34573abdb6b2680d4336ebfe9ccae4",
+ "count": 1000
+}
