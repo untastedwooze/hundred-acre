@@ -90,11 +90,19 @@ def parse_intraday_aggregates(pages: Pages, ticker: str) -> list[tuple[datetime,
     ]
 
 
-def parse_tickers(pages: Pages, *, active: bool) -> list[TickerRecord]:
+def parse_tickers(pages: Pages, *, active: bool | None) -> list[TickerRecord]:
+    """Each record's own `active` flag wins; `active` is only the fallback for a record without one (None: infer from `delisted_utc`)."""
+
+    def is_active(r: dict) -> bool:
+        if "active" in r:
+            return r["active"]
+        return active if active is not None else not r.get("delisted_utc")
+
     return [
         TickerRecord(
             ticker=r["ticker"], name=r.get("name"), type=r.get("type"), market=r.get("market", "stocks"),
-            share_class_figi=r.get("share_class_figi"), active=r.get("active", active),
+            share_class_figi=r.get("share_class_figi"), active=is_active(r),
+            cik=r.get("cik"), delisted_date=_date(r["delisted_utc"]) if r.get("delisted_utc") else None,
         )
         for r in _results(pages)
     ]
@@ -105,7 +113,7 @@ def parse_ticker_events(pages: Pages, ticker: str) -> list[TickerEvent]:
     for body in pages:
         events.extend((body.get("results") or {}).get("events") or [])
     return [
-        TickerEvent(ticker, _date(e["date"]), e.get("type", ""), (e.get("ticker_change") or {}).get("ticker"))
+        TickerEvent((e.get("ticker_change") or {}).get("ticker") or "", _date(e["date"]), e.get("type", ""))
         for e in events
     ]
 
@@ -160,7 +168,12 @@ def intraday_requests(ticker: str, start: date, end: date, *, adjusted: bool) ->
 
 
 def tickers_request(*, active: bool) -> tuple[str, dict]:
-    return "/v3/reference/tickers", {"active": _flag(active), "limit": 1000}
+    return "/v3/reference/tickers", {"active": _flag(active), "market": "stocks", "limit": 1000}
+
+
+def ticker_lookup_request(ticker: str) -> tuple[str, dict]:
+    """One ticker across all markets, active and inactive (no `market` or `active` filter)."""
+    return "/v3/reference/tickers", {"ticker": ticker}
 
 
 def ticker_events_request(ticker: str) -> tuple[str, dict]:
@@ -177,6 +190,14 @@ def dividends_request(since: date) -> tuple[str, dict]:
 
 def market_holidays_request() -> tuple[str, dict]:
     return "/v1/marketstatus/upcoming", {}
+
+
+def _next_cursor(body: object) -> str | None:
+    """The cursor in a response's top-level `next_url`, or None when there is no further page."""
+    url = body.get("next_url") if isinstance(body, dict) else None
+    if not isinstance(url, str):
+        return None
+    return urllib.parse.parse_qs(urllib.parse.urlparse(url).query).get("cursor", [None])[0]
 
 
 class MassiveSource:
@@ -203,7 +224,7 @@ class MassiveSource:
             unavailable = MarketDataUnavailable(str(exc).replace(self._api_key, "***"))
             unavailable.status = exc.status  # type: ignore[attr-defined]
             raise unavailable from None
-        return Page(body, body.get("next_cursor") if isinstance(body, dict) else None)
+        return Page(body, _next_cursor(body))
 
     def _get(self, path: str, params: dict | None = None) -> dict:
         return self.call(path, params).body
@@ -236,8 +257,16 @@ class MassiveSource:
             out.extend(parse_tickers(self._paged(*tickers_request(active=active)), active=active))
         return out
 
+    def lookup_ticker(self, ticker: str) -> list[TickerRecord]:
+        return parse_tickers(self._paged(*ticker_lookup_request(ticker)), active=None)
+
     def ticker_events(self, ticker: str) -> list[TickerEvent]:
-        return parse_ticker_events([self._get(*ticker_events_request(ticker))], ticker)
+        try:
+            return parse_ticker_events([self._get(*ticker_events_request(ticker))], ticker)
+        except MarketDataUnavailable as exc:
+            if getattr(exc, "status", None) == 404:  # no events record for this ticker
+                return []
+            raise
 
     def splits(self, since: date) -> list[Split]:
         return parse_splits(self._paged(*splits_request(since)))

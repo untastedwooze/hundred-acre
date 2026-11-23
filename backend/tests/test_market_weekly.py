@@ -3,7 +3,8 @@ from datetime import date, datetime, timezone
 from sqlalchemy import text
 
 from hundred_acre.market.cli import main
-from hundred_acre.market.jobs import load_daily_bars, run_weekly
+from hundred_acre.market.jobs import run_weekly
+from market_helpers import load_daily_bars
 from hundred_acre.market.lake import read_bars, read_intraday_bars
 from hundred_acre.market.source import BarData, FakeMarketDataSource, TickerRecord
 from hundred_acre.market.watchlist import add_to_watchlist

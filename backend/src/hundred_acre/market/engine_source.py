@@ -58,10 +58,12 @@ class EngineSource:
             while True:
                 with self._db.connect() as conn:
                     rows = conn.execute(
-                        text("SELECT id, state, last_error FROM requests WHERE id = ANY(:ids)"), {"ids": ids}).all()
+                        text("SELECT id, state, last_error, last_status FROM requests WHERE id = ANY(:ids)"), {"ids": ids}).all()
                 for row in rows:
                     if row.state == "failed":
-                        raise MarketDataUnavailable(row.last_error or "request failed")
+                        unavailable = MarketDataUnavailable(row.last_error or "request failed")
+                        unavailable.status = row.last_status  # type: ignore[attr-defined]
+                        raise unavailable
                 if all(row.state == "complete" for row in rows):
                     return [read_pages(self._db, self._dir, i) for i in ids]
                 check_engine(self._db, self._clock())
@@ -91,8 +93,17 @@ class EngineSource:
         active, inactive = self._fetch([m.tickers_request(active=True), m.tickers_request(active=False)])
         return m.parse_tickers(active, active=True) + m.parse_tickers(inactive, active=False)
 
+    def lookup_ticker(self, ticker: str) -> list[TickerRecord]:
+        return m.parse_tickers(self._one(m.ticker_lookup_request(ticker)), active=True)
+
     def ticker_events(self, ticker: str) -> list[TickerEvent]:
-        return m.parse_ticker_events(self._one(m.ticker_events_request(ticker)), ticker)
+        try:
+            pages = self._one(m.ticker_events_request(ticker))
+        except MarketDataUnavailable as exc:
+            if getattr(exc, "status", None) == 404:  # no events record for this ticker
+                return []
+            raise
+        return m.parse_ticker_events(pages, ticker)
 
     def splits(self, since: date) -> list[Split]:
         return m.parse_splits(self._one(m.splits_request(since)))

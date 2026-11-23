@@ -22,6 +22,14 @@ _Avoid_: Company, entity, CIK
 The symbol a Security trades under during a given period. A Security can have several Tickers over its life, and a Ticker can belong to different Securities at different times.
 _Avoid_: Symbol, security
 
+**Reference Record**:
+Massive's listing of one Ticker as used by one Security: its name, type, market, Issuer and share-class FIGI, whether it is still active, and, once inactive, the day it stopped trading. A Security has one Reference Record per Ticker it has traded under that Massive still lists.
+_Avoid_: Ticker record, ticker details, listing
+
+**Ticker History**:
+Massive's dated account of every Ticker a Security has traded under and the day each began. It is fetched once per Security and again only when that Security's Reference Records change. Where it contradicts the Reference Records, the Reference Records win.
+_Avoid_: Ticker events, rename log
+
 **Provisional Security**:
 A Security created from a Ticker that had no matching reference record for several trading days, marked unverified until a FIGI is attached to it.
 _Avoid_: Unknown ticker, placeholder

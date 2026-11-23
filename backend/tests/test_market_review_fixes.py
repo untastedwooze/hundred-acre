@@ -7,13 +7,16 @@ from sqlalchemy import text
 
 from hundred_acre.market.adjustments import corporate_action_history, sync_corporate_actions
 from hundred_acre.market.cli import main
-from hundred_acre.market.jobs import load_daily_bars, nightly_daily_bars, nightly_intraday_bars, run_weekly
+from hundred_acre.market.jobs import nightly_daily_bars, nightly_intraday_bars, run_weekly
+from market_helpers import load_daily_bars
 from hundred_acre.market.lake import read_bars, read_intraday_bars
 from hundred_acre.market.quarantine import list_provisional_securities
 from hundred_acre.market.source import (
-    BarData, Dividend, FakeMarketDataSource, MarketDataUnavailable, MarketHoliday, Split, TickerRecord,
+    BarData, Dividend, FakeMarketDataSource, MarketDataUnavailable, MarketHoliday, Split, TickerEvent, TickerRecord,
 )
+from hundred_acre.market.reference import sync_reference
 from hundred_acre.market.statistics import read_security_statistics
+from hundred_acre.market.ticker_history import fetch_ticker_history
 from hundred_acre.market.watchlist import add_to_watchlist
 
 MON, TUE = date(2026, 11, 23), date(2026, 11, 24)
@@ -133,11 +136,14 @@ def test_watchlist_add_unknown_ticker_fails_cleanly(market_engine, lake, capsys)
     assert "NOPE" in capsys.readouterr().err
 
 
-def test_otc_watchlist_and_unlisted_securities_get_no_empty_coverage(market_engine, lake):
+def test_otc_watchlist_securities_get_no_empty_coverage(market_engine, lake):
     s = source("AAA")
     s.tickers_.append(TickerRecord("OTCX", "Otc", "CS", "otc", "BBGOTC0000"))
-    s.tickers_.append(TickerRecord("LATE", "Late", "CS", "stocks", "BBGLATE000", list_date=date(2026, 12, 1)))
+    s.tickers_.append(TickerRecord("LATE", "Late", "CS", "stocks", "BBGLATE000"))
+    s.events["LATE"] = [TickerEvent("LATE", date(2026, 12, 1), "ticker_change")]  # Ticker History: not yet listed
     otc = add_to_watchlist(s, market_engine, lake, "OTCX", as_of=MON)
+    sync_reference(s, market_engine)
+    fetch_ticker_history(s, market_engine)
     load_daily_bars(s, MON, engine=market_engine, lake=lake)
 
     assert cov(market_engine, otc, MON) is None

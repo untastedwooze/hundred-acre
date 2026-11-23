@@ -138,8 +138,8 @@ def test_a_paged_query_is_one_request_answered_by_several_calls(world, market_en
     def split(t):
         return {"ticker": t, "execution_date": "2020-01-02", "split_from": 1, "split_to": 2}
 
-    pages = [{"results": [split("A")], "next_cursor": "c2"},
-             {"results": [split("B")], "next_cursor": "c3"},
+    pages = [{"results": [split("A")], "next_url": "https://api.massive.com/v3/x?cursor=c2&limit=1000"},
+             {"results": [split("B")], "next_url": "https://api.massive.com/v3/x?cursor=c3&limit=1000"},
              {"results": [split("C")]}]
     w = world({"/v3/reference/splits": pages}, per_minute=100)
     assert [s.ticker for s in w.source.splits(date(2020, 1, 1))] == ["A", "B", "C"]
@@ -151,7 +151,7 @@ def test_a_paged_query_is_one_request_answered_by_several_calls(world, market_en
 
 def test_no_more_than_the_configured_calls_in_any_60_seconds_even_across_a_restart(world):
     w = world({"/v3/reference/splits": [
-        {"results": [], "next_cursor": f"c{i}"} for i in range(1, 7)] + [{"results": []}]}, per_minute=3)
+        {"results": [], "next_url": f"https://api.massive.com/v3/x?cursor=c{i}"} for i in range(1, 7)] + [{"results": []}]}, per_minute=3)
     from hundred_acre.market.request_engine import enqueue
     enqueue(w.db, "/v3/reference/splits", {}, requester="t", now=w.clock())
     w.engine.serve(until=w.clock() + 1)
@@ -322,7 +322,7 @@ def test_requests_are_served_in_priority_class_order_and_fifo_within_a_class(wor
 def test_a_higher_class_request_gets_in_between_the_pages_of_a_running_lower_one(world):
     from hundred_acre.market.priority import PriorityClass as P
     from hundred_acre.market.request_engine import enqueue
-    pages = [{"results": [], "next_cursor": "c2"}, {"results": [], "next_cursor": "c3"}, {"results": []}]
+    pages = [{"results": [], "next_url": "https://api.massive.com/v3/x?cursor=c2&limit=1000"}, {"results": [], "next_url": "https://api.massive.com/v3/x?cursor=c3&limit=1000"}, {"results": []}]
     w = world({"/v3/reference/splits": pages, "/watch": {"results": []}}, per_minute=1)
     enqueue(w.db, "/v3/reference/splits", {}, requester="bf", now=w.clock(), priority=P.BACKFILL)
     w.engine.serve(until=w.clock() + 1)  # the backfill's first page only
@@ -370,7 +370,7 @@ def _state(db, request_id):
 
 
 def test_5xx_on_page_two_is_retried_with_backoff_without_refetching_page_one(world):
-    w = world({SPLITS: [{"results": [_split("A")], "next_cursor": "c2"}, MassiveError("boom", 503),
+    w = world({SPLITS: [{"results": [_split("A")], "next_url": "https://api.massive.com/v3/x?cursor=c2&limit=1000"}, MassiveError("boom", 503),
                         {"results": [_split("B")]}]}, per_minute=100)
     assert [s.ticker for s in w.source.splits(date(2020, 1, 1))] == ["A", "B"]
     assert [c[2].get("cursor") for c in w.transport.calls] == [None, "c2", "c2"]
@@ -478,7 +478,7 @@ def test_asking_again_after_completion_makes_new_calls(world):
     assert first != second and len(w.transport.calls) == 2
 
 
-PAGES3 = [{"results": [], "next_cursor": "c2"}, {"results": [], "next_cursor": "c3"}, {"results": []}]
+PAGES3 = [{"results": [], "next_url": "https://api.massive.com/v3/x?cursor=c2&limit=1000"}, {"results": [], "next_url": "https://api.massive.com/v3/x?cursor=c3&limit=1000"}, {"results": []}]
 
 
 def test_a_request_whose_waiter_stops_renewing_is_abandoned_before_its_next_call(world):
@@ -672,3 +672,8 @@ def test_priority_follows_live_waiters_not_the_highest_ever(world):
     enqueue(w.db, DIVS, {}, requester="t", now=w.clock(), priority=P.NIGHTLY_DAILY)
     w.engine.serve()
     assert [c[1] for c in w.transport.calls] == [DIVS, SPLITS]
+
+
+def test_ticker_events_404_through_the_engine_means_no_events(world):
+    w = world({"/vX/reference/tickers/AAPw/events": MassiveError("HTTP 404", 404)})
+    assert w.source.ticker_events("AAPw") == []

@@ -19,10 +19,12 @@ from hundred_acre.market.lake import (
     replace_intraday_bars, write_bars,
 )
 from hundred_acre.market.quarantine import quarantine_bars, release_quarantine
-from hundred_acre.market.reference import list_ticker_periods, security_on, securities_expected_to_trade, sync_reference
+from hundred_acre.market.reference import list_ticker_periods, period_preference, security_on, securities_expected_to_trade, sync_reference
+from hundred_acre.market.priority import PriorityClass, at_priority
 from hundred_acre.market.sessions import assign_sessions
-from hundred_acre.market.source import MarketDataSource, MarketDataUnavailable
+from hundred_acre.market.source import BarData, MarketDataSource, MarketDataUnavailable
 from hundred_acre.market.statistics import refresh_statistics
+from hundred_acre.market.ticker_history import fetch_ticker_history
 from hundred_acre.market.trading_calendar import (
     CalendarDisagreement, generate_calendar, previous_trading_day, read_trading_calendar,
 )
@@ -37,7 +39,7 @@ log = logging.getLogger(__name__)
 class LoadResult:
     trading_date: date
     bars_written: int
-    security_ids: dict[str, int] = field(default_factory=dict)  # ticker -> Security id, for the Bars written
+    security_ids: dict[str, int] = field(default_factory=dict)  # ticker -> Security id, for every Ticker that matched a Security
     unmatched_tickers: list[str] = field(default_factory=list)  # Tickers with no Security; their Bars are quarantined
     released_bars: int = 0  # Quarantined Bars (any date) released into the Daily Bars this run
     calendar_disagreements: list[CalendarDisagreement] = field(default_factory=list)  # Trading Calendar vs Massive
@@ -58,14 +60,22 @@ def refresh_calendar(source: MarketDataSource, engine: Engine, start: date, end:
     return found
 
 
+def _period_preferences(engine: Engine, on: date) -> dict[tuple[int, str], tuple[int, str]]:
+    """(Security id, Ticker) -> `period_preference` of that Ticker's period covering `on`; only covering periods are listed."""
+    return {
+        (security_id, ticker): period_preference(ticker, valid_from)
+        for ticker, security_id, valid_from, valid_to in list_ticker_periods(engine)
+        if (valid_from is None or valid_from <= on) and (valid_to is None or valid_to >= on)
+    }
+
+
 def load_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> LoadResult:
-    """Sync reference data, then load `as_of`'s Unadjusted grouped-daily Bars (OTC excluded) into the lake.
+    """Load `as_of`'s Unadjusted grouped-daily Bars (OTC excluded) into the lake.
 
     Coverage is recorded for Securities expected to trade that day (exchange-listed, Ticker period covering it); an
     over-the-counter or not-yet-listed Security gets none unless it traded. If the source is unreachable those
     Securities get failed Coverage and the error propagates.
     """
-    sync_reference(source, engine)
     expected = set(securities_expected_to_trade(engine, as_of))
     fetched_at = datetime.now(timezone.utc)
     try:
@@ -75,15 +85,26 @@ def load_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine, la
             for security_id in expected:
                 record_coverage(conn, security_id, "1d", [as_of], status="failed", fetched_at=fetched_at)
         raise
-    rows, matched, unmatched, quarantined = [], {}, [], []
+    matched, unmatched, quarantined = {}, [], []
+    kept: dict[int, tuple[tuple, BarData]] = {}  # Security id -> (preference, Bar) kept so far: one Bar per Security per day
+    preferences = _period_preferences(engine, as_of)
     for b in bars:
         security_id = security_on(engine, b.ticker, as_of)
         if security_id is None:
             unmatched.append(b.ticker)
             quarantined.append((b, as_of))
             continue
+        # `security_on` found a period of this Ticker covering the day, so it has a preference; the lowest one is kept.
+        preference = preferences[(security_id, b.ticker)]
+        if security_id in kept:
+            loser = b if preference >= kept[security_id][0] else kept[security_id][1]
+            quarantined.append((loser, as_of))
+            if loser is not b:
+                kept[security_id] = (preference, b)
+        else:
+            kept[security_id] = (preference, b)
         matched[b.ticker] = security_id
-        rows.append(bar_row(security_id, as_of, b, source=SOURCE_NAME, fetched_at=fetched_at))
+    rows = [bar_row(sid, as_of, b, source=SOURCE_NAME, fetched_at=fetched_at) for sid, (_, b) in kept.items()]
     write_bars(lake, pl.DataFrame(rows, schema=_SCHEMA), as_of)
     answered = set(matched.values())
     with engine.begin() as conn:  # Bars first, then Coverage, so Coverage never claims Bars that were not written
@@ -107,7 +128,7 @@ def _years_back(day: date, years: int) -> date:
 def _backfill(
     engine: Engine, lake: Lake, interval: str, start: date, as_of: date, periods: list[tuple], *,
     fetch: Callable[[str, list[date]], list],
-    build: Callable[[int, list[date], list, datetime], tuple[pl.DataFrame, dict[date, int]]],
+    build: Callable[[int, list[date], list, datetime, str], tuple[pl.DataFrame, dict[date, int]]],
     replace: Callable[[Lake, pl.DataFrame, list[int], list[date]], None],
 ) -> None:
     """Shared skeleton of the per-Ticker backfills.
@@ -132,7 +153,7 @@ def _backfill(
             with engine.begin() as conn:
                 record_coverage(conn, security_id, interval, missing, status="failed", fetched_at=fetched_at)
             continue
-        frame, counts = build(security_id, missing, fetched, fetched_at)
+        frame, counts = build(security_id, missing, fetched, fetched_at, ticker)
         replace(lake, frame, [security_id], missing)
         with engine.begin() as conn:
             record_coverage(
@@ -155,11 +176,11 @@ def backfill_daily_bars(
     """
     start = since or _years_back(as_of, years)
     refresh_calendar(source, engine, start, date(as_of.year + 1, 12, 31))
-    sync_reference(source, engine)
 
-    def build(security_id, missing, fetched, fetched_at):
+    def build(security_id, missing, fetched, fetched_at, ticker):
         by_day = {d: b for d, b in fetched if d in set(missing)}
-        rows = [bar_row(security_id, d, b, source=SOURCE_NAME, fetched_at=fetched_at) for d, b in sorted(by_day.items())]
+        rows = [bar_row(security_id, d, b, source=SOURCE_NAME, fetched_at=fetched_at, ticker=ticker)
+            for d, b in sorted(by_day.items())]
         return pl.DataFrame(rows, schema=_SCHEMA), {d: 1 for d in by_day}
 
     _backfill(
@@ -176,6 +197,7 @@ def nightly_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine,
     until it expires (retention: `snapshot_retention_days`). The Trading Calendar is regenerated through next year and
     cross-checked against Massive; disagreements come back on the result.
     """
+    sync_reference(source, engine)
     disagreements = refresh_calendar(source, engine, as_of - timedelta(days=14), date(as_of.year + 1, 12, 31))
     previous = previous_trading_day(engine, as_of)
     if previous is not None:
@@ -206,11 +228,11 @@ def backfill_intraday_bars(
     def fetch(ticker, missing):  # overnight Bars lead into a trading day from the evening before, up to a long weekend earlier
         return source.intraday_aggregates(ticker, missing[0] - timedelta(days=4), missing[-1], adjusted=False)
 
-    def build(security_id, missing, fetched, fetched_at):
+    def build(security_id, missing, fetched, fetched_at, ticker):
         wanted = set(missing)
         tagged = assign_sessions([t for t, _ in fetched], calendar)
         rows = [
-            bar_row(security_id, tag[0], b, source=SOURCE_NAME, fetched_at=fetched_at, bar_start=t, trading_session=tag[1])
+            bar_row(security_id, tag[0], b, source=SOURCE_NAME, fetched_at=fetched_at, ticker=ticker, bar_start=t, trading_session=tag[1])
             for (t, b), tag in zip(fetched, tagged)
             if tag is not None and tag[0] in wanted
         ]
@@ -226,7 +248,9 @@ def backfill_intraday_bars(
 
 
 def run_backfill(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> None:
-    """The `backfill` command: two years of Daily Bars for the Universe, then of Intraday Bars for the Watchlist."""
+    """The `backfill` command: Ticker History for Securities without any, then two years of Daily Bars for the Universe, then of Intraday Bars for the Watchlist."""
+    sync_reference(source, engine)
+    fetch_ticker_history(at_priority(source, PriorityClass.BACKFILL), engine, only_missing=True)
     backfill_daily_bars(source, as_of, engine=engine, lake=lake)
     backfill_intraday_bars(source, as_of, engine=engine, lake=lake)
 
@@ -294,6 +318,7 @@ def run_weekly(
     against Daily Bars with a re-fetch of each suspect day, then a refresh of the Daily Security Statistics the new
     Bars invalidated, then the Factor Exposure refresh. A failed import is logged and does not block the rest: the
     exposure refresh uses the last good vintage. `factor_source` defaults to French's Data Library."""
+    sync_reference(source, engine)
     if factor_source is None:
         factor_source = FrenchDataLibrarySource()
     try:
@@ -301,7 +326,6 @@ def run_weekly(
     except Exception as exc:  # whatever the import hit, the rest of the weekly job still runs
         log.warning("Reference Factor Return import failed, using the last good vintage: %s", exc, exc_info=True)
     since = as_of - timedelta(days=7)
-    sync_reference(source, engine)
     ids = non_watchlist_security_ids(engine, skipped_types=WEEKLY_SKIPPED_TYPES)
     backfill_intraday_bars(source, as_of, engine=engine, lake=lake, since=since, security_ids=ids)
     _resolve_suspect_days(source, as_of, since, ids, engine=engine, lake=lake)

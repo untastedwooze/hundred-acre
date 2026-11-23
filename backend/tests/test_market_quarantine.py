@@ -1,6 +1,6 @@
 from datetime import date, timedelta
 
-from hundred_acre.market.jobs import load_daily_bars
+from market_helpers import load_daily_bars
 from hundred_acre.market.lake import read_bars
 from hundred_acre.market.quarantine import list_provisional_securities, list_quarantined_bars
 from hundred_acre.market.reference import security_info, security_on
