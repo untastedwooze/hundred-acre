@@ -4,11 +4,11 @@
 CRON_TZ=America/New_York
 
 # reference-sync: 01:00 Tue-Sat
-0 1 * * 2-6 market reference-sync --as-of latest
+# DISABLED until reference-sync is incremental (each run is a ~54 h events sweep): 0 1 * * 2-6 market reference-sync --as-of latest
 # nightly: 02:00 Tue-Sat
-0 2 * * 2-6 market nightly --as-of latest
+# DISABLED until reference-sync is incremental (nightly runs sync_reference first): 0 2 * * 2-6 market nightly --as-of latest
 # weekly: 06:00 Sat
-0 6 * * 6 market weekly --as-of latest
+# DISABLED until #61 lands (weekly runs the old ~54 h sync_reference): 0 6 * * 6 market weekly --as-of latest
 
 # Spend backup (ADR-0001): 02:30 daily. State and failures: see ops/backup/spend-backup.sh.
 30 2 * * * bash /opt/hundred-acre/backup/spend-backup.sh
