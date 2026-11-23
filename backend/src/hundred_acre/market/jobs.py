@@ -19,7 +19,7 @@ from hundred_acre.market.lake import (
     replace_intraday_bars, write_bars,
 )
 from hundred_acre.market.quarantine import quarantine_bars, release_quarantine
-from hundred_acre.market.reference import list_ticker_periods, security_on, securities_expected_to_trade, sync_reference
+from hundred_acre.market.reference import list_ticker_periods, period_preference, security_on, securities_expected_to_trade, sync_reference
 from hundred_acre.market.priority import PriorityClass, at_priority
 from hundred_acre.market.sessions import assign_sessions
 from hundred_acre.market.source import BarData, MarketDataSource, MarketDataUnavailable
@@ -60,10 +60,10 @@ def refresh_calendar(source: MarketDataSource, engine: Engine, start: date, end:
     return found
 
 
-def _period_ranks(engine: Engine, on: date) -> dict[tuple[int, str], tuple]:
-    """(Security id, Ticker) -> sort key of the Ticker period covering `on`: later start wins, then earlier Ticker name."""
+def _period_preferences(engine: Engine, on: date) -> dict[tuple[int, str], tuple[int, str]]:
+    """(Security id, Ticker) -> `period_preference` of that Ticker's period covering `on`; only covering periods are listed."""
     return {
-        (security_id, ticker): (valid_from.toordinal() if valid_from else 0, tuple(-ord(c) for c in ticker))
+        (security_id, ticker): period_preference(ticker, valid_from)
         for ticker, security_id, valid_from, valid_to in list_ticker_periods(engine)
         if (valid_from is None or valid_from <= on) and (valid_to is None or valid_to >= on)
     }
@@ -86,22 +86,23 @@ def load_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine, la
                 record_coverage(conn, security_id, "1d", [as_of], status="failed", fetched_at=fetched_at)
         raise
     matched, unmatched, quarantined = {}, [], []
-    kept: dict[int, tuple[tuple, BarData]] = {}  # Security id -> (rank, Bar) kept so far: one Bar per Security per day
-    ranks = _period_ranks(engine, as_of)
+    kept: dict[int, tuple[tuple, BarData]] = {}  # Security id -> (preference, Bar) kept so far: one Bar per Security per day
+    preferences = _period_preferences(engine, as_of)
     for b in bars:
         security_id = security_on(engine, b.ticker, as_of)
         if security_id is None:
             unmatched.append(b.ticker)
             quarantined.append((b, as_of))
             continue
-        rank = ranks.get((security_id, b.ticker), (0, ()))
+        # `security_on` found a period of this Ticker covering the day, so it has a preference; the lowest one is kept.
+        preference = preferences[(security_id, b.ticker)]
         if security_id in kept:
-            loser = b if rank <= kept[security_id][0] else kept[security_id][1]
+            loser = b if preference >= kept[security_id][0] else kept[security_id][1]
             quarantined.append((loser, as_of))
             if loser is not b:
-                kept[security_id] = (rank, b)
+                kept[security_id] = (preference, b)
         else:
-            kept[security_id] = (rank, b)
+            kept[security_id] = (preference, b)
         matched[b.ticker] = security_id
     rows = [bar_row(sid, as_of, b, source=SOURCE_NAME, fetched_at=fetched_at) for sid, (_, b) in kept.items()]
     write_bars(lake, pl.DataFrame(rows, schema=_SCHEMA), as_of)

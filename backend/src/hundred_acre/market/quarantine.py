@@ -13,7 +13,7 @@ from sqlalchemy import Engine, text
 
 from hundred_acre.market.coverage import record_coverage
 from hundred_acre.market.lake import BAR_SCHEMA, Lake, add_bars, bar_row, securities_with_bars
-from hundred_acre.market.reference import security_on
+from hundred_acre.market.reference import period_preference_on, security_on
 from hundred_acre.market.source import BarData
 from hundred_acre.market.trading_calendar import count_trading_days, generate_calendar
 
@@ -114,15 +114,24 @@ def release_quarantine(engine: Engine, lake: Lake) -> int:
     released: list[tuple[str, date]] = []
     covered: list[tuple[int, date, datetime]] = []
     taken: dict[date, set[int]] = {}  # Securities that already have a Daily Bar on the day: one Bar per Security per day
+    # (day, Security) -> (preference, Bar): of several Quarantined Bars of one Security on a day, the most preferred Ticker
+    # period wins, as in `load_daily_bars`, whatever order the Bars are listed in.
+    winners: dict[tuple[date, int], tuple[tuple, QuarantinedBar]] = {}
     for q in list_quarantined_bars(engine):
         security_id = security_on(engine, q.ticker, q.trading_date)
         if security_id is None:
             continue
-        if q.trading_date not in taken:
-            taken[q.trading_date] = securities_with_bars(lake, q.trading_date)
-        if security_id in taken[q.trading_date]:
+        preference = period_preference_on(engine, q.ticker, security_id, q.trading_date)
+        if preference is None:
+            continue
+        key = (q.trading_date, security_id)
+        if key not in winners or preference < winners[key][0]:
+            winners[key] = (preference, q)
+    for (day, security_id), (_, q) in winners.items():
+        if day not in taken:
+            taken[day] = securities_with_bars(lake, day)
+        if security_id in taken[day]:
             continue  # stays quarantined: that Security already has its Bar for the day
-        taken[q.trading_date].add(security_id)
         by_date.setdefault(q.trading_date, []).append(
             bar_row(security_id, q.trading_date, q, source=q.source, fetched_at=q.fetched_at)
         )

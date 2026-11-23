@@ -90,11 +90,18 @@ def parse_intraday_aggregates(pages: Pages, ticker: str) -> list[tuple[datetime,
     ]
 
 
-def parse_tickers(pages: Pages, *, active: bool) -> list[TickerRecord]:
+def parse_tickers(pages: Pages, *, active: bool | None) -> list[TickerRecord]:
+    """Each record's own `active` flag wins; `active` is only the fallback for a record without one (None: infer from `delisted_utc`)."""
+
+    def is_active(r: dict) -> bool:
+        if "active" in r:
+            return r["active"]
+        return active if active is not None else not r.get("delisted_utc")
+
     return [
         TickerRecord(
             ticker=r["ticker"], name=r.get("name"), type=r.get("type"), market=r.get("market", "stocks"),
-            share_class_figi=r.get("share_class_figi"), active=r.get("active", active),
+            share_class_figi=r.get("share_class_figi"), active=is_active(r),
             cik=r.get("cik"), delisted_date=_date(r["delisted_utc"]) if r.get("delisted_utc") else None,
         )
         for r in _results(pages)
@@ -251,7 +258,7 @@ class MassiveSource:
         return out
 
     def lookup_ticker(self, ticker: str) -> list[TickerRecord]:
-        return parse_tickers(self._paged(*ticker_lookup_request(ticker)), active=True)
+        return parse_tickers(self._paged(*ticker_lookup_request(ticker)), active=None)
 
     def ticker_events(self, ticker: str) -> list[TickerEvent]:
         try:
