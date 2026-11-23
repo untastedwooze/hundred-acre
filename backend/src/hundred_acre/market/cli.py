@@ -17,6 +17,7 @@ from hundred_acre.market.priority import PriorityClass, at_priority
 from hundred_acre.market.reference import security_on, sync_reference
 from hundred_acre.market.source import MarketDataSource, MarketDataUnavailable
 from hundred_acre.market.statistics import refresh_statistics
+from hundred_acre.market.ticker_history import fetch_ticker_history
 from hundred_acre.market.trading_calendar import latest_closed_trading_day
 from hundred_acre.market.watchlist import add_to_watchlist, remove_from_watchlist, watchlist
 
@@ -37,6 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(job, help=f"run the {job} job")
         p.add_argument("--as-of", type=_as_of, required=True,
                        help="as-of trading date, YYYY-MM-DD, or 'latest' (the last trading day whose after-hours session has closed)")
+    th = sub.add_parser("ticker-history", help="fetch Ticker History for Securities that have none or whose Reference Records changed")
+    th.add_argument("--force", action="store_true", help="refetch every Security's Ticker History")
     re_ = sub.add_parser("request-engine", help="the Request Engine, the only process that calls Massive")
     re_sub = re_.add_subparsers(dest="request_engine_command", required=True)
     re_sub.add_parser("status", help="show engine state, queue depth, Call usage and recent failures (database only)")
@@ -59,7 +62,7 @@ def _job_priority(job: str) -> PriorityClass:
     return {
         "reference-sync": PriorityClass.NIGHTLY_DAILY, "nightly": PriorityClass.NIGHTLY_DAILY,
         "weekly": PriorityClass.WEEKLY_UNIVERSE, "backfill": PriorityClass.BACKFILL,
-        "watchlist": PriorityClass.INTERACTIVE,
+        "watchlist": PriorityClass.INTERACTIVE, "ticker-history": PriorityClass.BACKFILL,
     }[job]
 
 
@@ -101,6 +104,8 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
     try:
         if args.command == "reference-sync":
             sync_reference(source, engine)
+        elif args.command == "ticker-history":
+            print(f"fetched Ticker History for {fetch_ticker_history(source, engine, force=args.force)} securities")
         elif args.command == "nightly":
             result = nightly_daily_bars(source, args.as_of, engine=engine, lake=lake)
             print(f"loaded {result.bars_written} daily bars for {args.as_of}")
