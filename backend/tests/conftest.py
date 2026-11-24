@@ -67,7 +67,9 @@ def lake(market_db_url, tmp_path):
     """A DuckLake whose catalog is the throwaway database and whose data path is a temp directory."""
     from hundred_acre.market.lake import Lake
 
-    return Lake(catalog_url=market_db_url, data_path=tmp_path / "ducklake")
+    lake = Lake(catalog_url=market_db_url, data_path=tmp_path / "ducklake")
+    yield lake
+    lake.close()
 
 
 @pytest.fixture(autouse=True)
