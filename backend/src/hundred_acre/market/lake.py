@@ -1,9 +1,10 @@
 """DuckLake store for Bars (ADR-0002): catalog in the market Postgres database, Parquet files under a data path."""
 
 import os
+import threading
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
 
@@ -62,6 +63,8 @@ BASES = ("none", "split", "total_return")
 class Lake:
     catalog_url: str  # SQLAlchemy URL of the hundred_acre_market database
     data_path: Path
+    _attached: list = field(default_factory=list, init=False, repr=False, compare=False)  # [(pid, connection)]
+    _attach_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False, compare=False)
 
     @classmethod
     def from_env(cls) -> "Lake":
@@ -78,6 +81,31 @@ class Lake:
 
     @contextmanager
     def connect(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """A cursor on this process's one attached DuckLake; ATTACH and catalog setup run only on first use.
+
+        Each cursor has its own transaction and registered views, so callers (and threads) don't share state.
+        """
+        cur = self._database().cursor()
+        try:
+            yield cur
+        finally:
+            cur.close()
+
+    def close(self) -> None:
+        """Detach: close this process's DuckDB (the next `connect()` attaches again)."""
+        with self._attach_lock:
+            while self._attached:
+                self._attached.pop()[1].close()
+
+    def _database(self) -> duckdb.DuckDBPyConnection:
+        with self._attach_lock:
+            if self._attached and self._attached[0][0] != os.getpid():
+                self._attached.clear()  # inherited across fork: not ours to use or close
+            if not self._attached:
+                self._attached.append((os.getpid(), self._attach()))
+            return self._attached[0][1]
+
+    def _attach(self) -> duckdb.DuckDBPyConnection:
         self.data_path.mkdir(parents=True, exist_ok=True)
         con = duckdb.connect()
         try:
@@ -104,9 +132,10 @@ class Lake:
             if new_intraday:
                 con.execute("ALTER TABLE lake.intraday_bars SET PARTITIONED BY (year(trading_date), month(trading_date))")
                 con.execute("ALTER TABLE lake.intraday_bars SET SORTED BY (security_id, bar_start)")
-            yield con
-        finally:
+        except BaseException:
             con.close()
+            raise
+        return con
 
 
 @contextmanager
