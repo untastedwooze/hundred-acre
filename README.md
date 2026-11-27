@@ -46,7 +46,7 @@ The DuckLake Parquet files (`$HUNDRED_ACRE_DATA_DIR/lake`) and the Massive respo
 
 ### Schedule
 
-The `scheduler` service runs the committed crontab `ops/scheduler/crontab` in US Eastern time (follows daylight saving): `reference-sync` 01:00 Tue-Sat, `nightly` 02:00 Tue-Sat, `weekly` 06:00 Sat, and the Spend backup 02:30 daily. `backfill` is not scheduled.
+The `scheduler` service runs the committed crontab `ops/scheduler/crontab` in US Eastern time (follows daylight saving): `nightly` 02:00 Tue-Sat (syncs the reference data first, ADR-0005), `weekly` 06:00 Sat, and the Spend backup 02:30 daily. `backfill` is not scheduled.
 
 ### One-off commands
 
