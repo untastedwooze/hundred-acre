@@ -23,7 +23,7 @@ from sqlalchemy import Engine, text
 from hundred_acre.market.delistings import delisting
 from hundred_acre.market.factors.reference_returns import VintageInfo, latest_vintage, read_reference_factor_returns
 from hundred_acre.market.factors.source import FACTOR_COLUMNS
-from hundred_acre.market.lake import Lake, current_snapshot, read_bars, transaction
+from hundred_acre.market.lake import Lake, commit, current_snapshot, read_bars
 from hundred_acre.market.returns import daily_total_returns
 
 MODELS: dict[str, tuple[str, ...]] = {
@@ -175,9 +175,11 @@ def refresh_factor_exposures(
         ).select(EXPOSURE_COLUMNS)
         with lake.connect() as con:
             con.register("incoming", frame.to_arrow())
-            with transaction(con):
-                con.execute("DELETE FROM lake.factor_exposures WHERE security_id = ?", [sid])
-                con.execute("INSERT INTO lake.factor_exposures SELECT * FROM incoming")
+            commit(
+                con,
+                ("DELETE FROM lake.factor_exposures WHERE security_id = ?", [sid]),
+                "INSERT INTO lake.factor_exposures SELECT * FROM incoming",
+            )
     return ExposureRefreshResult(todo)
 
 

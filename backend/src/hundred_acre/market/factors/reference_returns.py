@@ -11,7 +11,7 @@ from datetime import date, datetime, timezone
 import polars as pl
 
 from hundred_acre.market.factors.source import RETURN_COLUMNS, ReferenceFactorSource, parse_reference_factors
-from hundred_acre.market.lake import Lake, transaction
+from hundred_acre.market.lake import Lake, commit
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS lake.reference_factor_returns (
@@ -84,8 +84,7 @@ def import_reference_factor_returns(
             fingerprint=pl.lit(fingerprint),
         ).select("vintage", "imported_at", "fingerprint", "trading_date", *RETURN_COLUMNS)
         con.register("incoming", incoming.to_arrow())
-        with transaction(con):
-            con.execute("INSERT INTO lake.reference_factor_returns SELECT * FROM incoming")
+        commit(con, "INSERT INTO lake.reference_factor_returns SELECT * FROM incoming")
     return ImportResult(True, vintage, first, last, df.height)
 
 

@@ -1,7 +1,9 @@
 """DuckLake store for Bars (ADR-0002): catalog in the market Postgres database, Parquet files under a data path."""
 
 import os
+import random
 import threading
+import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -138,16 +140,40 @@ class Lake:
         return con
 
 
-@contextmanager
-def transaction(con: duckdb.DuckDBPyConnection) -> Iterator[None]:
-    """BEGIN ... COMMIT around the block, ROLLBACK if it raises."""
+COMMIT_ATTEMPTS = 5
+COMMIT_RETRY_WAIT_S = 0.5  # before the second attempt; doubles each time, with jitter
+
+Statement = str | tuple[str, Sequence]
+
+
+def commit(con: duckdb.DuckDBPyConnection, *statements: Statement) -> None:
+    """Run `statements` (SQL, or SQL with parameters) in one transaction; ROLLBACK if one raises.
+
+    DuckLake checks conflicts per table at COMMIT: another writer that committed a delete from a table this transaction
+    inserts into fails it, even for other rows (`nightly` meeting a `backfill`). On such a conflict the whole
+    transaction runs again from BEGIN, up to COMMIT_ATTEMPTS times with growing waits, then the conflict is raised.
+    Statements are plain SQL against the cursor's registered views, so a retry repeats nothing else.
+    """
+    for attempt in range(1, COMMIT_ATTEMPTS + 1):
+        try:
+            _commit_once(con, statements)
+            return
+        except duckdb.TransactionException as e:
+            if "Transaction conflict" not in str(e) or attempt == COMMIT_ATTEMPTS:
+                raise
+        time.sleep(COMMIT_RETRY_WAIT_S * 2 ** (attempt - 1) * random.uniform(0.5, 1.5))
+
+
+def _commit_once(con: duckdb.DuckDBPyConnection, statements: Sequence[Statement]) -> None:
     con.execute("BEGIN")
     try:
-        yield
+        for statement in statements:
+            sql, params = (statement, None) if isinstance(statement, str) else statement
+            con.execute(sql, params)
     except BaseException:
         con.execute("ROLLBACK")
         raise
-    con.execute("COMMIT")
+    con.execute("COMMIT")  # a failed COMMIT leaves no transaction open
 
 
 def bar_row(
@@ -167,21 +193,25 @@ def write_bars(lake: Lake, bars: pl.DataFrame, trading_date: date) -> None:
     """Replace `trading_date`'s Daily Bars with `bars` in one transaction (re-runs are idempotent)."""
     with lake.connect() as con:
         con.register("incoming", bars.select(BAR_COLUMNS).to_arrow())
-        with transaction(con):
-            con.execute("DELETE FROM lake.daily_bars WHERE trading_date = ?", [trading_date])
-            con.execute("INSERT INTO lake.daily_bars SELECT * FROM incoming")
+        commit(
+            con,
+            ("DELETE FROM lake.daily_bars WHERE trading_date = ?", [trading_date]),
+            "INSERT INTO lake.daily_bars SELECT * FROM incoming",
+        )
 
 
 def replace_bars(lake: Lake, bars: pl.DataFrame, security_ids: Sequence[int], days: Sequence[date]) -> None:
     """Replace `security_ids`' Daily Bars on `days` with `bars` in one transaction."""
     with lake.connect() as con:
         con.register("incoming", bars.select(BAR_COLUMNS).to_arrow())
-        with transaction(con):
-            con.execute(
+        commit(
+            con,
+            (
                 "DELETE FROM lake.daily_bars WHERE list_contains(?, security_id) AND list_contains(?, trading_date)",
                 [list(security_ids), list(days)],
-            )
-            con.execute("INSERT INTO lake.daily_bars SELECT * FROM incoming")
+            ),
+            "INSERT INTO lake.daily_bars SELECT * FROM incoming",
+        )
 
 
 def securities_with_bars(lake: Lake, trading_date: date) -> set[int]:
@@ -195,12 +225,14 @@ def add_bars(lake: Lake, bars: pl.DataFrame, trading_date: date) -> None:
     """Add Bars to `trading_date`, replacing only those of the same Securities and leaving other Bars untouched."""
     with lake.connect() as con:
         con.register("incoming", bars.select(BAR_COLUMNS).to_arrow())
-        with transaction(con):
-            con.execute(
+        commit(
+            con,
+            (
                 "DELETE FROM lake.daily_bars WHERE trading_date = ? AND security_id IN (SELECT security_id FROM incoming)",
                 [trading_date],
-            )
-            con.execute("INSERT INTO lake.daily_bars SELECT * FROM incoming")
+            ),
+            "INSERT INTO lake.daily_bars SELECT * FROM incoming",
+        )
 
 
 DEFAULT_SNAPSHOT_RETENTION_DAYS = 90
@@ -271,12 +303,14 @@ def replace_intraday_bars(lake: Lake, bars: pl.DataFrame, security_ids: Sequence
     """Replace `security_ids`' Intraday Bars on trading `days` with `bars` in one transaction, sorted by Security then bar_start."""
     with lake.connect() as con:
         con.register("incoming", bars.select(INTRADAY_COLUMNS).sort("security_id", "bar_start").to_arrow())
-        with transaction(con):
-            con.execute(
+        commit(
+            con,
+            (
                 "DELETE FROM lake.intraday_bars WHERE list_contains(?, security_id) AND list_contains(?, trading_date)",
                 [list(security_ids), list(days)],
-            )
-            con.execute("INSERT INTO lake.intraday_bars SELECT * FROM incoming ORDER BY security_id, bar_start")
+            ),
+            "INSERT INTO lake.intraday_bars SELECT * FROM incoming ORDER BY security_id, bar_start",
+        )
 
 
 def read_intraday_bars(
