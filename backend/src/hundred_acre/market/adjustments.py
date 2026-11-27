@@ -14,7 +14,7 @@ from datetime import date
 import polars as pl
 from sqlalchemy import Engine, text
 
-from hundred_acre.market.lake import Lake, read_bars, transaction
+from hundred_acre.market.lake import Lake, commit, read_bars
 from hundred_acre.market.reference import security_on
 from hundred_acre.market.source import MarketDataSource
 
@@ -127,9 +127,11 @@ def rebuild_adjustment_factors(engine: Engine, lake: Lake, security_id: int) -> 
     )
     with lake.connect() as con:
         con.register("incoming", frame.to_arrow())
-        with transaction(con):
-            con.execute("DELETE FROM lake.adjustment_factors WHERE security_id = ?", [security_id])
-            con.execute("INSERT INTO lake.adjustment_factors SELECT * FROM incoming")
+        commit(
+            con,
+            ("DELETE FROM lake.adjustment_factors WHERE security_id = ?", [security_id]),
+            "INSERT INTO lake.adjustment_factors SELECT * FROM incoming",
+        )
 
 
 _PRICE_COLUMNS = ("open", "high", "low", "close", "vwap")

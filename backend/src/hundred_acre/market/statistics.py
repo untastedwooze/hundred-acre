@@ -14,7 +14,7 @@ from datetime import date
 
 import polars as pl
 
-from hundred_acre.market.lake import Lake, read_bars, read_intraday_bars, transaction
+from hundred_acre.market.lake import Lake, commit, read_bars, read_intraday_bars
 
 METHOD = "regular-session 5m split-adjusted log-return realized volatility; close-to-open overnight return; vwap dollar volume"
 PARAMETERS = {"interval": "5m", "session": "regular", "adjustment": "split", "avg_volume_windows": [20, 60]}
@@ -99,9 +99,11 @@ def refresh_statistics(lake: Lake, *, security_ids: list[int] | None = None, ful
         )
         with lake.connect() as con:
             con.register("incoming", frame.to_arrow())
-            with transaction(con):
-                con.execute("DELETE FROM lake.daily_security_statistics WHERE security_id = ?", [sid])
-                con.execute("INSERT INTO lake.daily_security_statistics SELECT * FROM incoming")
+            commit(
+                con,
+                ("DELETE FROM lake.daily_security_statistics WHERE security_id = ?", [sid]),
+                "INSERT INTO lake.daily_security_statistics SELECT * FROM incoming",
+            )
     return StatisticsResult(todo)
 
 
