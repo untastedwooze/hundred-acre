@@ -247,12 +247,15 @@ def backfill_intraday_bars(
     )
 
 
-def run_backfill(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake) -> None:
-    """The `backfill` command: Ticker History for Securities without any, then two years of Daily Bars for the Universe, then of Intraday Bars for the Watchlist."""
+def run_backfill(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake, since: date | None = None) -> None:
+    """The `backfill` command: Ticker History for Securities without any, then two years of Daily Bars for the Universe, then of Intraday Bars for the Watchlist.
+
+    `since` starts both backfills on that date instead of two years before `as_of`.
+    """
     sync_reference(source, engine)
     fetch_ticker_history(at_priority(source, PriorityClass.BACKFILL), engine, only_missing=True)
-    backfill_daily_bars(source, as_of, engine=engine, lake=lake)
-    backfill_intraday_bars(source, as_of, engine=engine, lake=lake)
+    backfill_daily_bars(source, as_of, engine=engine, lake=lake, since=since)
+    backfill_intraday_bars(source, as_of, engine=engine, lake=lake, since=since)
 
 
 DEFAULT_VOLUME_MISMATCH_THRESHOLD = 0.05
