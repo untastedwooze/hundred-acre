@@ -1,11 +1,13 @@
 """Coverage: one row per Security, interval and trading day recording what has been fetched."""
 
 from collections.abc import Iterable, Sequence
+import time
 from datetime import date, datetime
 
 import polars as pl
 from sqlalchemy import Connection, Engine, text
 
+from hundred_acre.market.history_limit import history_limit, utc_today
 from hundred_acre.market.trading_calendar import NYSE
 
 STATUSES = ("complete", "empty", "failed", "partial")  # "suspect" is also stored but summarised with its own queue
@@ -39,10 +41,24 @@ def record_coverage(
     )
 
 
+def _limit(today: date | None, history_years: int | None) -> date:
+    """The History Limit; `today` (default the real UTC date) and `history_years` (default MASSIVE_HISTORY_YEARS) can be fixed in tests."""
+    return history_limit(utc_today(time.time()) if today is None else today, history_years)
+
+
 def days_to_fetch(
-    engine: Engine, security_id: int, interval: str, start: date, end: date, *, calendar_id: str = NYSE
+    engine: Engine,
+    security_id: int,
+    interval: str,
+    start: date,
+    end: date,
+    *,
+    calendar_id: str = NYSE,
+    today: date | None = None,
+    history_years: int | None = None,
 ) -> list[date]:
-    """Trading Calendar days in [start, end] minus complete or empty Coverage."""
+    """Trading Calendar days in [start, end] minus complete or empty Coverage, never before the History Limit."""
+    start = max(start, _limit(today, history_years))
     with engine.connect() as conn:
         return list(
             conn.execute(
@@ -65,11 +81,15 @@ def coverage_summary(
     end: date,
     *,
     calendar_id: str = NYSE,
+    today: date | None = None,
+    history_years: int | None = None,
 ) -> pl.DataFrame:
     """Per Security, how many Trading Calendar days in [start, end] are complete, empty, failed, partial or never fetched.
 
-    Only Trading Calendar days count, so a holiday is never reported as missing.
+    Only Trading Calendar days count, so a holiday is never reported as missing. Days before the History Limit are
+    ignored (their rows are kept), so they are never reported as failed or missing.
     """
+    start = max(start, _limit(today, history_years))
     with engine.connect() as conn:
         rows = conn.execute(
             text(
