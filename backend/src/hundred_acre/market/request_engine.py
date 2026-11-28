@@ -263,7 +263,7 @@ class RequestEngine:
                     if self._wait(next_retry - now, now, until):
                         return made
                     continue
-                skipped = [r for r in pending if self._sent_path(r.path, now) is None]
+                skipped = [r for r in pending if not r.next_cursor and self._sent_path(r.path, now) is None]
                 if skipped:
                     self._complete_without_call(skipped, now)
                     continue
@@ -325,14 +325,16 @@ class RequestEngine:
         with self._db.begin() as conn:
             for r in requests:
                 conn.execute(text(
-                    "UPDATE requests SET state = 'complete', next_cursor = NULL, note = :n, finished_at = :now WHERE id = :r"),
+                    "UPDATE requests SET state = 'complete', next_cursor = NULL, note = :n, finished_at = :now "
+                    "WHERE id = :r AND state IN ('queued', 'in_progress')"),
                     {"n": note, "now": now, "r": r.id})
                 conn.execute(text("SELECT pg_notify(:c, :r)"), {"c": NOTIFY_CHANNEL, "r": str(r.id)})
 
     def _serve_batch(self, batch: list, now: float) -> None:
         call_ids = {}
         limit = self._limit(now)
-        sent = {r.id: self._sent_path(r.path, now) for r in batch}
+        # A paged Request already under way carries on from its cursor even if the limit has since passed its window.
+        sent = {r.id: self._sent_path(r.path, now) or r.path for r in batch}
         with self._db.begin() as conn:
             for r in batch:
                 page = conn.execute(text(
