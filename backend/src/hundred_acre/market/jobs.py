@@ -2,6 +2,7 @@
 
 import logging
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -13,6 +14,7 @@ from hundred_acre.market.coverage import days_to_fetch, mark_suspect, record_cov
 from hundred_acre.market.factors import (
     FrenchDataLibrarySource, ReferenceFactorSource, import_reference_factor_returns, refresh_factor_exposures,
 )
+from hundred_acre.market.history_limit import history_limit, utc_today
 from hundred_acre.market.lake import BAR_SCHEMA as _SCHEMA
 from hundred_acre.market.lake import (
     INTRADAY_SCHEMA, Lake, bar_row, expire_snapshots, read_bars, read_intraday_bars, replace_bars,
@@ -118,15 +120,14 @@ def load_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine, la
     return LoadResult(as_of, len(rows), matched, unmatched, released)
 
 
-def _years_back(day: date, years: int) -> date:
-    try:
-        return day.replace(year=day.year - years) + timedelta(days=1)
-    except ValueError:  # 29 February
-        return day.replace(year=day.year - years, day=28) + timedelta(days=1)
+def _backfill_start(since: date | None, today: date | None) -> date:
+    """Where a backfill starts: `since`, but never before the History Limit (the default)."""
+    limit = history_limit(utc_today(time.time()) if today is None else today)
+    return limit if since is None else max(since, limit)
 
 
 def _backfill(
-    engine: Engine, lake: Lake, interval: str, start: date, as_of: date, periods: list[tuple], *,
+    engine: Engine, lake: Lake, interval: str, start: date, as_of: date, periods: list[tuple], *, today: date | None = None,
     fetch: Callable[[str, list[date]], list],
     build: Callable[[int, list[date], list, datetime, str], tuple[pl.DataFrame, dict[date, int]]],
     replace: Callable[[Lake, pl.DataFrame, list[int], list[date]], None],
@@ -141,7 +142,7 @@ def _backfill(
     for ticker, security_id, valid_from, valid_to in periods:  # each Ticker is fetched only for the days it was in use
         missing = [
             d
-            for d in days_to_fetch(engine, security_id, interval, start, as_of)
+            for d in days_to_fetch(engine, security_id, interval, start, as_of, today=today)
             if (valid_from is None or d >= valid_from) and (valid_to is None or d <= valid_to)
         ]
         if not missing:
@@ -166,15 +167,16 @@ def _backfill(
 
 
 def backfill_daily_bars(
-    source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake, years: int = 2, since: date | None = None
+    source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake, since: date | None = None,
+    today: date | None = None,
 ) -> None:
-    """Fetch per-Security Unadjusted Daily Bars for the last `years` years up to `as_of` (or from `since`).
+    """Fetch per-Security Unadjusted Daily Bars from the History Limit (or from `since`, if later) up to `as_of`.
 
     Fetches only Trading Calendar days minus complete or empty Coverage, one Security at a time with its Bars and
     Coverage written together, so an interrupted run resumes without refetching completed days. A Security the
     source cannot answer for is marked failed and retried on the next run.
     """
-    start = since or _years_back(as_of, years)
+    start = _backfill_start(since, today)
     refresh_calendar(source, engine, start, date(as_of.year + 1, 12, 31))
 
     def build(security_id, missing, fetched, fetched_at, ticker):
@@ -184,7 +186,7 @@ def backfill_daily_bars(
         return pl.DataFrame(rows, schema=_SCHEMA), {d: 1 for d in by_day}
 
     _backfill(
-        engine, lake, "1d", start, as_of, list_ticker_periods(engine),
+        engine, lake, "1d", start, as_of, list_ticker_periods(engine), today=today,
         fetch=lambda ticker, missing: source.aggregates(ticker, missing[0], missing[-1], adjusted=False),
         build=build, replace=replace_bars,
     )
@@ -209,8 +211,8 @@ def nightly_daily_bars(source: MarketDataSource, as_of: date, *, engine: Engine,
 
 
 def backfill_intraday_bars(
-    source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake, years: int = 2, since: date | None = None,
-    security_ids: list[int] | None = None,
+    source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake, since: date | None = None,
+    security_ids: list[int] | None = None, today: date | None = None,
 ) -> None:
     """Fetch five-minute Intraday Bars (all Trading Sessions) for `security_ids` (default: the Watchlist) up to `as_of`.
 
@@ -218,7 +220,7 @@ def backfill_intraday_bars(
     its Bars and Coverage written together. Each Bar is tagged with its Trading Session from the Trading Calendar
     and gaps within a day are left as gaps: a day with any Bars is complete, a day without is empty.
     """
-    start = since or _years_back(as_of, years)
+    start = _backfill_start(since, today)
     generate_calendar(engine, start - timedelta(days=7), as_of + timedelta(days=10))
     calendar = read_trading_calendar(engine, start - timedelta(days=7), as_of + timedelta(days=10))
     ids = watchlist(engine) if security_ids is None else security_ids
@@ -226,7 +228,7 @@ def backfill_intraday_bars(
         return
 
     def fetch(ticker, missing):  # overnight Bars lead into a trading day from the evening before, up to a long weekend earlier
-        return source.intraday_aggregates(ticker, missing[0] - timedelta(days=4), missing[-1], adjusted=False)
+        return source.intraday_aggregates(ticker, max(missing[0] - timedelta(days=4), start), missing[-1], adjusted=False)
 
     def build(security_id, missing, fetched, fetched_at, ticker):
         wanted = set(missing)
@@ -243,14 +245,14 @@ def backfill_intraday_bars(
 
     _backfill(
         engine, lake, INTRADAY_INTERVAL, start, as_of, list_ticker_periods(engine, ids),
-        fetch=fetch, build=build, replace=replace_intraday_bars,
+        fetch=fetch, build=build, replace=replace_intraday_bars, today=today,
     )
 
 
 def run_backfill(source: MarketDataSource, as_of: date, *, engine: Engine, lake: Lake, since: date | None = None) -> None:
-    """The `backfill` command: Ticker History for Securities without any, then two years of Daily Bars for the Universe, then of Intraday Bars for the Watchlist.
+    """The `backfill` command: Ticker History for Securities without any, then Daily Bars for the Universe, then Intraday Bars for the Watchlist, each from the History Limit.
 
-    `since` starts both backfills on that date instead of two years before `as_of`.
+    `since` starts both backfills later than that; one earlier than the History Limit is clamped to it.
     """
     sync_reference(source, engine)
     fetch_ticker_history(at_priority(source, PriorityClass.BACKFILL), engine, only_missing=True)
