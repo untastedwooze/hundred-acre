@@ -139,3 +139,17 @@ def test_backfilled_bars_record_the_ticker_they_were_fetched_under(market_engine
     df = read_bars(lake, [ids["MSFT"]], FIRST, LAST, columns=["ticker"])
 
     assert df["ticker"].to_list() == ["MSFT"] * len(TRADING_DAYS)
+
+
+def test_backfill_command_since_starts_the_window_later(market_engine, lake):
+    """`market backfill --since D` backfills from D, e.g. when the plan's history no longer reaches the default start (#71)."""
+    from hundred_acre.market.cli import main
+
+    since = date(2026, 11, 25)
+    assert main(["backfill", "--as-of", "2026-11-30", "--since", since.isoformat()],
+                source=two_security_source(), engine=market_engine, lake=lake) == 0
+
+    ids = ids_of(market_engine)
+    msft = summary_for(market_engine, [ids["MSFT"]])[ids["MSFT"]]
+    assert (msft["complete"], msft["never_fetched"]) == (3, 2)  # 25, 27, 30 fetched; 23 and 24 left alone
+    assert read_bars(lake, [ids["MSFT"]], FIRST, LAST)["trading_date"].min() == since

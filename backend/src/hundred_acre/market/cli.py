@@ -38,6 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(job, help=f"run the {job} job")
         p.add_argument("--as-of", type=_as_of, required=True,
                        help="as-of trading date, YYYY-MM-DD, or 'latest' (the last trading day whose after-hours session has closed)")
+        if job == "backfill":
+            p.add_argument("--since", type=date.fromisoformat, default=None,
+                           help="first date to backfill, YYYY-MM-DD (default: two years back from --as-of)")
     th = sub.add_parser("ticker-history", help="fetch Ticker History for Securities that have none or whose Reference Records changed")
     th.add_argument("--force", action="store_true", help="refetch every Security's Ticker History")
     re_ = sub.add_parser("request-engine", help="the Request Engine, the only process that calls Massive")
@@ -134,6 +137,8 @@ def main(argv: list[str] | None = None, *, source: MarketDataSource | None = Non
                 print(f"market: the {args.command} job is not available yet", file=sys.stderr)
                 return 2
             extra = {"factor_source": factor_source} if args.command == "weekly" and factor_source is not None else {}
+            if args.command == "backfill":
+                extra["since"] = args.since
             job(source, args.as_of, engine=engine, lake=lake, **extra)
     except MarketDataUnavailable as exc:
         print(f"market: data source unavailable: {exc}", file=sys.stderr)
