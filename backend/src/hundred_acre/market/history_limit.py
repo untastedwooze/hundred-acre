@@ -12,7 +12,16 @@ DEFAULT_HISTORY_YEARS = 2
 
 def history_years_from_env() -> int:
     """The configured span in years (`MASSIVE_HISTORY_YEARS`)."""
-    return int(os.environ.get("MASSIVE_HISTORY_YEARS", DEFAULT_HISTORY_YEARS))
+    raw = os.environ.get("MASSIVE_HISTORY_YEARS", "").strip()
+    if not raw:
+        return DEFAULT_HISTORY_YEARS
+    try:
+        years = int(raw)
+    except ValueError:
+        years = 0
+    if years < 1:
+        raise ValueError(f"MASSIVE_HISTORY_YEARS must be a whole number of years, at least 1; got {raw!r}")
+    return years
 
 
 def history_limit(today: date, years: int | None = None) -> date:

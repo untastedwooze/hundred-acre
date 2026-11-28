@@ -114,3 +114,44 @@ def test_the_history_span_is_configurable(world):
     _ask(w, DAILY.format("2020-01-01", "2026-01-31"))
     w.engine.serve()
     assert _calls(w.db)[0][1] == date(2025, 11, 28)
+
+
+def test_a_paged_request_in_progress_is_not_truncated_when_the_limit_passes_its_window(world):
+    path = DAILY.format("2020-01-01", "2024-11-27")  # wholly before the limit now, but page 1 was already fetched
+    w = world({path: {"results": [DAY_BAR]}})
+    _at(w, NOON_2026_11_28)
+    rid = _ask(w, path)
+    with w.db.begin() as conn:
+        conn.execute(text("UPDATE requests SET state = 'in_progress', next_cursor = 'c2' WHERE id = :i"), {"i": rid})
+    w.engine.serve()
+    assert [c[1] for c in w.transport.calls] == [path]
+    assert w.transport.calls[0][2].get("cursor") == "c2"
+    assert _request(w.db, rid).state == "complete"
+
+
+def test_completing_without_a_call_never_touches_a_request_that_is_no_longer_unfinished(world):
+    w = world({})
+    _at(w, NOON_2026_11_28)
+    rid = _ask(w, DAILY.format("2020-01-01", "2024-11-27"))
+    with w.db.begin() as conn:
+        conn.execute(text("UPDATE requests SET state = 'abandoned' WHERE id = :i"), {"i": rid})
+        row = conn.execute(text("SELECT id FROM requests WHERE id = :i"), {"i": rid}).one()
+    w.engine._complete_without_call([row], NOON_2026_11_28)
+    assert _request(w.db, rid).state == "abandoned"
+
+
+def test_history_years_from_env_validates_the_variable(monkeypatch):
+    import pytest
+
+    from hundred_acre.market.history_limit import history_years_from_env
+
+    monkeypatch.delenv("MASSIVE_HISTORY_YEARS", raising=False)
+    assert history_years_from_env() == 2
+    monkeypatch.setenv("MASSIVE_HISTORY_YEARS", "")
+    assert history_years_from_env() == 2
+    monkeypatch.setenv("MASSIVE_HISTORY_YEARS", "5")
+    assert history_years_from_env() == 5
+    for bad in ("abc", "1.5", "0", "-3"):
+        monkeypatch.setenv("MASSIVE_HISTORY_YEARS", bad)
+        with pytest.raises(ValueError, match="MASSIVE_HISTORY_YEARS"):
+            history_years_from_env()
