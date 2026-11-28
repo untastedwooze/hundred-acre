@@ -118,6 +118,10 @@ _Avoid_: Job, task, fetch
 The named urgency of a Request, which decides the order the Request Engine serves them in: interactive (a person is waiting), nightly Watchlist, nightly Daily, weekly Universe, then backfill.
 _Avoid_: Priority number, weight
 
+**History Limit**:
+The earliest trading day Massive will serve on our plan: a fixed span of years back from today, so it moves forward one day each day.
+_Avoid_: Plan limit, lookback, cutoff
+
 **Call**:
 One HTTP hit against Massive, made while answering a Request. Calls are what Massive's rate limit counts.
 _Avoid_: Request (that means the whole query), hit
