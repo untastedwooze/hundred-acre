@@ -149,6 +149,7 @@ One long-running Request Engine is the only process that calls Massive; all jobs
 | --- | --- |
 | `MASSIVE_API_KEY` | none (required; never written to rows, files, logs or errors) |
 | `MASSIVE_CALLS_PER_MINUTE` | `5` |
+| `MASSIVE_HISTORY_YEARS` | `2` (the History Limit: the Request Engine clamps Bar windows to this many years before today, UTC) |
 | `MASSIVE_MAX_CONCURRENT_CALLS` | `1` |
 | `MARKET_RESPONSES_DIR` | none (required; directory for gzip-compressed response bodies, may point at object storage later) |
 | `MARKET_DATABASE_URL` | `postgresql+psycopg://hundred_acre:hundred_acre@localhost:5433/hundred_acre_market` |

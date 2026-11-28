@@ -13,6 +13,7 @@ x-backend: &backend
     MARKET_RESPONSES_DIR: ${HUNDRED_ACRE_DATA_DIR:?set HUNDRED_ACRE_DATA_DIR in .env}/responses
     MASSIVE_API_KEY: ${MASSIVE_API_KEY:-}
     MASSIVE_CALLS_PER_MINUTE: ${MASSIVE_CALLS_PER_MINUTE:-5}
+    MASSIVE_HISTORY_YEARS: ${MASSIVE_HISTORY_YEARS:-2}
     MASSIVE_MAX_CONCURRENT_CALLS: ${MASSIVE_MAX_CONCURRENT_CALLS:-1}
   # DuckLake records its data path in the catalog, so the host directory is mounted at the SAME absolute path
   # as on the host; host-side `uv run market ...` then agrees with the containers.

@@ -13,7 +13,7 @@ from hundred_acre.market.reference import (
 from hundred_acre.market.source import MarketDataSource
 
 
-def add_to_watchlist(source: MarketDataSource, engine: Engine, lake: Lake, ticker: str, *, as_of: date) -> int:
+def add_to_watchlist(source: MarketDataSource, engine: Engine, lake: Lake, ticker: str, *, as_of: date, today: date | None = None) -> int:
     """Put the Security `ticker` referred to on `as_of` on the Watchlist and backfill its missing Intraday history.
 
     An over-the-counter Ticker the Universe does not hold yet is added to it by hand here. Returns the Security id.
@@ -30,7 +30,7 @@ def add_to_watchlist(source: MarketDataSource, engine: Engine, lake: Lake, ticke
     from hundred_acre.market.jobs import backfill_intraday_bars  # jobs imports this module
 
     backfill = at_priority(source, PriorityClass.BACKFILL)
-    backfill_intraday_bars(backfill, as_of, engine=engine, lake=lake, security_ids=[security_id])
+    backfill_intraday_bars(backfill, as_of, engine=engine, lake=lake, security_ids=[security_id], today=today)
     return security_id
 
 

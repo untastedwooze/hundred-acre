@@ -153,3 +153,70 @@ def test_backfill_command_since_starts_the_window_later(market_engine, lake):
     msft = summary_for(market_engine, [ids["MSFT"]])[ids["MSFT"]]
     assert (msft["complete"], msft["never_fetched"]) == (3, 2)  # 25, 27, 30 fetched; 23 and 24 left alone
     assert read_bars(lake, [ids["MSFT"]], FIRST, LAST)["trading_date"].min() == since
+
+
+# History Limit (ADR-0006): with today = 2026-11-30 and 2 years, the limit is 2024-11-30 (a Saturday), so the first
+# served trading day is Monday 2024-12-02. Trading days 25, 26, 27 and 29 Nov 2024 are behind it (28th is Thanksgiving).
+LIMIT_TODAY = date(2026, 11, 30)
+OLD_FIRST = date(2024, 11, 25)
+OLD_LAST = date(2024, 12, 4)
+
+
+def seed_old_coverage(engine):
+    from datetime import datetime
+
+    from hundred_acre.market.coverage import record_coverage
+    from hundred_acre.market.reference import sync_reference
+    from hundred_acre.market.trading_calendar import generate_calendar
+
+    sync_reference(two_security_source(), engine)
+    generate_calendar(engine, OLD_FIRST, OLD_LAST)
+    sid = ids_of(engine)["AAPL"]
+    now = datetime(2026, 11, 28, 12, 0)
+    with engine.begin() as conn:
+        record_coverage(conn, sid, "1d", [date(2024, 11, 25)], status="failed", fetched_at=now)
+        record_coverage(conn, sid, "1d", [date(2024, 11, 26)], status="complete", fetched_at=now, bar_counts={date(2024, 11, 26): 1})
+        record_coverage(conn, sid, "1d", [date(2024, 11, 27)], status="empty", fetched_at=now)
+        record_coverage(conn, sid, "1d", [date(2024, 12, 2)], status="failed", fetched_at=now)
+    return sid
+
+
+def test_days_to_fetch_never_includes_days_before_the_history_limit(market_engine):
+    from hundred_acre.market.coverage import days_to_fetch
+
+    sid = seed_old_coverage(market_engine)
+
+    days = days_to_fetch(market_engine, sid, "1d", OLD_FIRST, OLD_LAST, today=LIMIT_TODAY, history_years=2)
+
+    assert days == [date(2024, 12, 2), date(2024, 12, 3), date(2024, 12, 4)]
+
+
+def test_summary_ignores_days_before_the_history_limit_but_keeps_their_rows(market_engine):
+    from sqlalchemy import text
+
+    from hundred_acre.market.coverage import coverage_summary
+
+    sid = seed_old_coverage(market_engine)
+
+    row = coverage_summary(
+        market_engine, [sid], "1d", OLD_FIRST, OLD_LAST, today=LIMIT_TODAY, history_years=2
+    ).row(0, named=True)
+
+    assert (row["failed"], row["partial"], row["suspect"], row["never_fetched"]) == (1, 0, 0, 2)  # only Dec 2-4 count
+    assert (row["complete"], row["empty"]) == (0, 0)
+    with market_engine.connect() as conn:
+        assert conn.execute(text("SELECT count(*) FROM coverage WHERE security_id = :s"), {"s": sid}).scalar() == 4
+
+
+def test_raising_the_history_years_brings_earlier_days_back(market_engine):
+    from hundred_acre.market.coverage import coverage_summary, days_to_fetch
+
+    sid = seed_old_coverage(market_engine)
+
+    days = days_to_fetch(market_engine, sid, "1d", OLD_FIRST, OLD_LAST, today=LIMIT_TODAY, history_years=3)
+    row = coverage_summary(
+        market_engine, [sid], "1d", OLD_FIRST, OLD_LAST, today=LIMIT_TODAY, history_years=3
+    ).row(0, named=True)
+
+    assert days == [date(2024, 11, 25), date(2024, 11, 29), date(2024, 12, 2), date(2024, 12, 3), date(2024, 12, 4)]
+    assert (row["failed"], row["complete"], row["empty"], row["never_fetched"]) == (2, 1, 1, 3)

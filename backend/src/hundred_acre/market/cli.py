@@ -40,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
                        help="as-of trading date, YYYY-MM-DD, or 'latest' (the last trading day whose after-hours session has closed)")
         if job == "backfill":
             p.add_argument("--since", type=date.fromisoformat, default=None,
-                           help="first date to backfill, YYYY-MM-DD (default: two years back from --as-of)")
+                           help="first date to backfill, YYYY-MM-DD (default and earliest: the History Limit, which an earlier date is clamped to)")
     th = sub.add_parser("ticker-history", help="fetch Ticker History for Securities that have none or whose Reference Records changed")
     th.add_argument("--force", action="store_true", help="refetch every Security's Ticker History")
     re_ = sub.add_parser("request-engine", help="the Request Engine, the only process that calls Massive")
