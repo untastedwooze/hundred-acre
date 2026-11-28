@@ -10,11 +10,15 @@ import json
 import os
 import time
 from collections.abc import Callable
+from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from sqlalchemy import Engine, text
 
+from hundred_acre.market.history_limit import (
+    DEFAULT_HISTORY_YEARS, clamp_bar_path, history_limit, history_years_from_env, is_bar_path, utc_today,
+)
 from hundred_acre.market.massive import MassiveSource
 from hundred_acre.market.priority import PRIORITY_ORDER, PriorityClass
 from hundred_acre.market.source import MarketDataUnavailable
@@ -173,10 +177,12 @@ class RequestEngine:
     def __init__(
         self, engine: Engine, massive: MassiveSource, responses_dir: Path, *,
         calls_per_minute: int = DEFAULT_CALLS_PER_MINUTE, max_concurrent_calls: int = DEFAULT_MAX_CONCURRENT_CALLS,
+        history_years: int = DEFAULT_HISTORY_YEARS,
         clock: Callable[[], float] = time.time, sleep: Callable[[float], None] = time.sleep,
     ):
         self._db, self._massive, self._dir = engine, massive, Path(responses_dir)
         self._per_minute, self._max_concurrent = calls_per_minute, max_concurrent_calls
+        self._history_years = history_years
         self._clock, self._sleep = clock, sleep
         self._lock_conn = None
         self._last_beat: float | None = None
@@ -194,6 +200,7 @@ class RequestEngine:
             engine, MassiveSource.from_env(), Path(responses),
             calls_per_minute=int(os.environ.get("MASSIVE_CALLS_PER_MINUTE", DEFAULT_CALLS_PER_MINUTE)),
             max_concurrent_calls=int(os.environ.get("MASSIVE_MAX_CONCURRENT_CALLS", DEFAULT_MAX_CONCURRENT_CALLS)),
+            history_years=history_years_from_env(),
             **kwargs,
         )
 
@@ -256,6 +263,10 @@ class RequestEngine:
                     if self._wait(next_retry - now, now, until):
                         return made
                     continue
+                skipped = [r for r in pending if self._sent_path(r.path, now) is None]
+                if skipped:
+                    self._complete_without_call(skipped, now)
+                    continue
                 starts = conn.execute(text(
                     "SELECT started_at FROM calls WHERE started_at > :since ORDER BY started_at"),
                     {"since": now - WINDOW_SECONDS}).scalars().all()
@@ -301,15 +312,36 @@ class RequestEngine:
         self._sleep_beating(seconds)
         return False
 
+    def _limit(self, now: float) -> date:
+        return history_limit(utc_today(now), self._history_years)
+
+    def _sent_path(self, path: str, now: float) -> str | None:
+        """The path to send as of `now` (a Bar window moved up to the History Limit); None when there is nothing to ask."""
+        return clamp_bar_path(path, self._limit(now))
+
+    def _complete_without_call(self, requests: list, now: float) -> None:
+        """A Bar window wholly before the History Limit has nothing to fetch: complete it empty, with no Call."""
+        note = f"made no Call: the whole window is before the History Limit {self._limit(now).isoformat()}"
+        with self._db.begin() as conn:
+            for r in requests:
+                conn.execute(text(
+                    "UPDATE requests SET state = 'complete', next_cursor = NULL, note = :n, finished_at = :now WHERE id = :r"),
+                    {"n": note, "now": now, "r": r.id})
+                conn.execute(text("SELECT pg_notify(:c, :r)"), {"c": NOTIFY_CHANNEL, "r": str(r.id)})
+
     def _serve_batch(self, batch: list, now: float) -> None:
         call_ids = {}
+        limit = self._limit(now)
+        sent = {r.id: self._sent_path(r.path, now) for r in batch}
         with self._db.begin() as conn:
             for r in batch:
                 page = conn.execute(text(
                     "SELECT count(*) + 1 FROM calls WHERE request_id = :r AND http_status = 200"), {"r": r.id}).scalar_one()
                 call_ids[r.id] = (conn.execute(text(
-                    "INSERT INTO calls (request_id, page, started_at) VALUES (:r, :p, :now) RETURNING id"),
-                    {"r": r.id, "p": page, "now": now}).scalar_one(), page)
+                    "INSERT INTO calls (request_id, page, started_at, sent_path, history_limit) "
+                    "VALUES (:r, :p, :now, :sp, :hl) RETURNING id"),
+                    {"r": r.id, "p": page, "now": now, "sp": sent[r.id],
+                     "hl": limit if is_bar_path(r.path) else None}).scalar_one(), page)
                 conn.execute(text("UPDATE requests SET state = 'in_progress' WHERE id = :r"), {"r": r.id})
 
         def one(r):
@@ -318,7 +350,7 @@ class RequestEngine:
                 params["cursor"] = r.next_cursor
             began = self._clock()
             try:
-                return self._massive.call(r.path, params), None, None, self._clock() - began
+                return self._massive.call(sent[r.id], params), None, None, self._clock() - began
             except MarketDataUnavailable as exc:
                 return None, str(exc), getattr(exc, "status", None), self._clock() - began
             except Exception as exc:  # e.g. a 200 with a body that is not JSON: a failed attempt, never an engine crash
@@ -331,9 +363,10 @@ class RequestEngine:
                 results = list(pool.map(one, batch))
         for r, (page_result, error, status, duration) in zip(batch, results):
             call_id, page = call_ids[r.id]
-            self._record(r.id, call_id, page, page_result, error, status, duration)
+            self._record(r.id, call_id, page, page_result, error, status, duration,
+                         window=(sent[r.id], limit) if is_bar_path(r.path) else None)
 
-    def _record(self, request_id, call_id, page, result, error, status, duration) -> None:
+    def _record(self, request_id, call_id, page, result, error, status, duration, window=None) -> None:
         body_path = size = None
         if result is not None:
             try:
@@ -349,7 +382,7 @@ class RequestEngine:
                 "UPDATE calls SET duration = :d, http_status = :s, response_bytes = :size, body_path = :p WHERE id = :id"),
                 {"d": duration, "s": 200 if result is not None else (status or 0), "size": size, "p": body_path, "id": call_id})
             if result is None:
-                self._record_failure(conn, request_id, error, status)
+                self._record_failure(conn, request_id, error, status, window)
                 conn.execute(text("SELECT pg_notify(:c, :r)"), {"c": NOTIFY_CHANNEL, "r": str(request_id)})
             elif result.next_cursor:
                 conn.execute(text("UPDATE requests SET next_cursor = :c, retry_at = NULL WHERE id = :r"),
@@ -360,7 +393,7 @@ class RequestEngine:
                     {"now": self._clock(), "r": request_id})
                 conn.execute(text("SELECT pg_notify(:c, :r)"), {"c": NOTIFY_CHANNEL, "r": str(request_id)})
 
-    def _record_failure(self, conn, request_id: int, error: str | None, status: int | None) -> None:
+    def _record_failure(self, conn, request_id: int, error: str | None, status: int | None, window=None) -> None:
         now = self._clock()
         if status == 429:  # global pause; the Request is retried and this is not an attempt
             conn.execute(text("UPDATE request_engine_state SET paused_until = :u WHERE id = 1"),
@@ -379,7 +412,8 @@ class RequestEngine:
             {"e": error, "s": status, "now": now, "r": request_id})
         if status in (401, 403):
             conn.execute(text("UPDATE request_engine_state SET state = 'halted', halt_reason = :why WHERE id = 1"),
-                         {"why": f"Massive answered HTTP {status} for request {request_id}: {error}"})
+                         {"why": f"Massive answered HTTP {status} for request {request_id}: {error}" + (
+                             f" (window sent {window[0]}; History Limit applied {window[1].isoformat()})" if window else "")})
 
     def _heartbeat(self, now: float) -> None:
         if self._last_beat is not None and 0 <= now - self._last_beat < HEARTBEAT_INTERVAL:
